@@ -95,7 +95,11 @@ export default function Home() {
               fontFamily: "'Georgia', serif", boxSizing: 'border-box', marginBottom: 12, outline: 'none',
             }}
           />
-          {passwordError && <div style={{ color: '#e07070', fontSize: 13, marginBottom: 12 }}>Incorrect password. Please try again.</div>}
+          {passwordError && (
+            <div style={{ color: '#e07070', fontSize: 13, marginBottom: 12 }}>
+              Incorrect password. Please try again.
+            </div>
+          )}
           <button onClick={handlePasswordSubmit} style={{
             width: '100%', padding: '12px 32px',
             background: 'linear-gradient(135deg, #c8a96e, #8b6914)',
@@ -238,9 +242,12 @@ function Section({ number, title, children }: { number: string; title: string; c
 }
 
 function SingleUploadBox({ label, accept, file, onChange, inputRef, icon }: {
-  label: string; accept: string; file: File | null;
-  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  inputRef: React.RefObject<HTMLInputElement>; icon: string;
+  label: string
+  accept: string
+  file: File | null
+  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void
+  inputRef: React.RefObject<HTMLInputElement>
+  icon: string
 }) {
   return (
     <div onClick={() => inputRef.current?.click()} style={{
@@ -255,3 +262,53 @@ function SingleUploadBox({ label, accept, file, onChange, inputRef, icon }: {
           <div style={{ color: '#888', fontSize: 14 }}>{label}</div>
           <div style={{ color: '#555', fontSize: 12, marginTop: 4 }}>PDF</div>
         </>
+      ) : (
+        <div style={{ textAlign: 'left' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 16 }}>✅</span>
+            <span style={{ color: '#c8a96e', fontSize: 14 }}>{file.name}</span>
+            <span style={{ color: '#555', fontSize: 12 }}>({(file.size / 1024).toFixed(1)} KB)</span>
+          </div>
+          <div style={{ color: '#555', fontSize: 12, marginTop: 8 }}>Click to change</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MultiUploadBox({ label, accept, files, onChange, inputRef, icon }: {
+  label: string
+  accept: string
+  files: File[]
+  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void
+  inputRef: React.RefObject<HTMLInputElement>
+  icon: string
+}) {
+  return (
+    <div onClick={() => inputRef.current?.click()} style={{
+      border: `2px dashed ${files.length > 0 ? '#c8a96e' : '#2a2a3a'}`,
+      borderRadius: 8, padding: '28px 24px', textAlign: 'center', cursor: 'pointer',
+      background: files.length > 0 ? 'rgba(200,169,110,0.04)' : '#0d0f14', transition: 'all 0.2s',
+    }}>
+      <input ref={inputRef} type="file" accept={accept} multiple onChange={onChange} style={{ display: 'none' }} />
+      {files.length === 0 ? (
+        <>
+          <div style={{ fontSize: 28, marginBottom: 8 }}>{icon}</div>
+          <div style={{ color: '#888', fontSize: 14 }}>{label}</div>
+          <div style={{ color: '#555', fontSize: 12, marginTop: 4 }}>{accept.toUpperCase().replace(/\./g, '').replace(/,/g, ' / ')}</div>
+        </>
+      ) : (
+        <div style={{ textAlign: 'left' }}>
+          {files.map(f => (
+            <div key={f.name} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+              <span style={{ fontSize: 16 }}>✅</span>
+              <span style={{ color: '#c8a96e', fontSize: 14 }}>{f.name}</span>
+              <span style={{ color: '#555', fontSize: 12 }}>({(f.size / 1024).toFixed(1)} KB)</span>
+            </div>
+          ))}
+          <div style={{ color: '#555', fontSize: 12, marginTop: 8 }}>Click to change</div>
+        </div>
+      )}
+    </div>
+  )
+}
