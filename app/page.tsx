@@ -140,7 +140,7 @@ export default function Home() {
             Generate Invoices
           </h1>
           <p style={{ color: '#888', fontSize: 15, margin: 0, lineHeight: 1.6 }}>
-            Upload your Excel invoice files, billing email PDF, and any LANDEX receipt PDFs.
+            Upload your Excel invoice files, any LANDEX receipt PDFs, and the billing email PDF.
             One complete PDF invoice will be generated per Excel file.
           </p>
         </div>
@@ -156,18 +156,7 @@ export default function Home() {
           />
         </Section>
 
-        <Section number="2" title="Upload Billing Email PDF">
-          <SingleUploadBox
-            label="Drop the billing email PDF here or click to browse"
-            accept=".pdf"
-            file={emailFile}
-            onChange={e => setEmailFile(e.target.files?.[0] || null)}
-            inputRef={emailRef}
-            icon="📧"
-          />
-        </Section>
-
-        <Section number="3" title="Upload LANDEX Receipt PDFs (Optional)">
+        <Section number="2" title="Upload LANDEX Receipt PDFs (Optional)">
           <MultiUploadBox
             label="Drop receipt PDFs here or click to browse — optional"
             accept=".pdf"
@@ -179,6 +168,17 @@ export default function Home() {
           <div style={{ fontSize: 12, color: '#666', marginTop: 8 }}>
             Receipts are matched to invoices by invoice number. Each receipt will be appended to its matching invoice.
           </div>
+        </Section>
+
+        <Section number="3" title="Upload Billing Email PDF">
+          <SingleUploadBox
+            label="Drop the billing email PDF here or click to browse"
+            accept=".pdf"
+            file={emailFile}
+            onChange={e => setEmailFile(e.target.files?.[0] || null)}
+            inputRef={emailRef}
+            icon="📧"
+          />
         </Section>
 
         <Section number="4" title="Generate Invoices">
