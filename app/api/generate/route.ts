@@ -287,31 +287,19 @@ async function buildInvoicePdf(
     body: tableBody,
     theme: 'grid',
     styles: {
-      font: 'helvetica',
-      fontSize: 8,
-      textColor: black,
-      fillColor: white,
-      cellPadding: 4,
-      lineColor: black,
-      lineWidth: 0.3,
-      overflow: 'linebreak',
-      cellWidth: 'wrap',
-    },
-    headStyles: {
-      textColor: black,
-      fillColor: headerBg,
-      fontStyle: 'bold',
-      halign: 'center',
+      font: 'helvetica', fontSize: 8, textColor: black,
+      fillColor: white, cellPadding: 4, lineColor: black, lineWidth: 0.3,
       overflow: 'linebreak',
     },
+    headStyles: { textColor: black, fillColor: headerBg, fontStyle: 'bold', halign: 'center' },
     columnStyles: {
-      0: { cellWidth: 70 },
-      1: { halign: 'center', cellWidth: 40 },
-      2: { halign: 'right', cellWidth: 65 },
-      3: { halign: 'right', cellWidth: 80 },
-      4: { halign: 'right', cellWidth: 65 },
-      5: { halign: 'right', cellWidth: 65 },
-      6: { cellWidth: 'auto', overflow: 'linebreak' },
+      0: { cellWidth: 75 },
+      1: { halign: 'center', cellWidth: 42 },
+      2: { halign: 'right', cellWidth: 62 },
+      3: { halign: 'right', cellWidth: 82 },
+      4: { halign: 'right', cellWidth: 62 },
+      5: { halign: 'right', cellWidth: 62 },
+      6: { cellWidth: 105, overflow: 'linebreak' },
     },
     didParseCell: function(data) {
       if (data.section === 'body' && data.row.index === totalsRowIndex) {
@@ -330,7 +318,7 @@ async function buildInvoicePdf(
   doc.setFont('helvetica', 'italic')
   doc.text('Please contact our accounting department with any questions regarding invoices', 306, finalY, { align: 'center' })
 
-  // ============ PAGE 2: WORK DETAIL ============
+  // ============ PAGE 2: WORK DETAIL (portrait, font size 7, tight cols) ============
   doc.addPage()
   doc.setFillColor(...white)
   doc.rect(0, 0, 612, 792, 'F')
@@ -377,7 +365,7 @@ async function buildInvoicePdf(
   const detailTotalCol = hasDetailCopies ? 8 : 7
 
   if (hasDetailCopies) {
-    detailHead = [['Landman', 'Date', 'Prospect', 'Legal', 'Lease No.', 'Days', 'Labor Total', 'Copies', 'Total', 'Description']]
+    detailHead = [['Landman', 'Date', 'Prospect', 'Legal', 'Lease No.', 'Days', 'Labor\nTotal', 'Copies', 'Total', 'Description']]
     detailBody = detailDataRows.map(r => {
       const row = r as unknown[]
       return [
@@ -395,7 +383,7 @@ async function buildInvoicePdf(
     })
     detailBody.push(['Totals', '', '', '', '', totalDays.toFixed(2), fmtCurrency(totalLaborTotal), fmtCurrency(totalCopies), fmtCurrency(totalTotal), ''])
   } else {
-    detailHead = [['Landman', 'Date', 'Prospect', 'Legal', 'Lease No.', 'Days', 'Labor Total', 'Total', 'Description']]
+    detailHead = [['Landman', 'Date', 'Prospect', 'Legal', 'Lease No.', 'Days', 'Labor\nTotal', 'Total', 'Description']]
     detailBody = detailDataRows.map(r => {
       const row = r as unknown[]
       return [
@@ -415,6 +403,9 @@ async function buildInvoicePdf(
 
   const detailTotalsIndex = detailBody.length - 1
 
+  // Column widths tuned to fit portrait 532pt usable width (612 - 40 margins each side)
+  // With copies: 55+45+55+65+55+28+48+48+48+85 = 532
+  // Without copies: 55+45+55+65+55+28+55+55+119 = 532
   autoTable(doc, {
     startY: 60,
     head: detailHead,
@@ -422,14 +413,14 @@ async function buildInvoicePdf(
     theme: 'grid',
     styles: {
       font: 'helvetica',
-      fontSize: 7.5,
+      fontSize: 7,
       textColor: black,
       fillColor: white,
       cellPadding: 3,
       lineColor: black,
       lineWidth: 0.3,
       overflow: 'linebreak',
-      cellWidth: 'wrap',
+      valign: 'top',
     },
     headStyles: {
       textColor: black,
@@ -437,17 +428,29 @@ async function buildInvoicePdf(
       fontStyle: 'bold',
       halign: 'center',
       overflow: 'linebreak',
+      valign: 'middle',
     },
-    columnStyles: {
-      0: { cellWidth: 55 },
-      1: { cellWidth: 45 },
-      2: { cellWidth: 60, overflow: 'linebreak' },
-      3: { cellWidth: 60, overflow: 'linebreak' },
+    columnStyles: hasDetailCopies ? {
+      0: { cellWidth: 55, overflow: 'linebreak' },
+      1: { cellWidth: 45, overflow: 'linebreak' },
+      2: { cellWidth: 55, overflow: 'linebreak' },
+      3: { cellWidth: 65, overflow: 'linebreak' },
       4: { cellWidth: 55, overflow: 'linebreak' },
-      5: { halign: 'center', cellWidth: 28 },
-      6: { halign: 'right', cellWidth: 48 },
-      7: { halign: 'right', cellWidth: 48 },
-      8: { halign: 'right', cellWidth: 'auto', overflow: 'linebreak' },
+      5: { cellWidth: 28, halign: 'center' },
+      6: { cellWidth: 48, halign: 'right' },
+      7: { cellWidth: 48, halign: 'right' },
+      8: { cellWidth: 48, halign: 'right' },
+      9: { cellWidth: 85, overflow: 'linebreak' },
+    } : {
+      0: { cellWidth: 55, overflow: 'linebreak' },
+      1: { cellWidth: 45, overflow: 'linebreak' },
+      2: { cellWidth: 55, overflow: 'linebreak' },
+      3: { cellWidth: 65, overflow: 'linebreak' },
+      4: { cellWidth: 55, overflow: 'linebreak' },
+      5: { cellWidth: 28, halign: 'center' },
+      6: { cellWidth: 55, halign: 'right' },
+      7: { cellWidth: 55, halign: 'right' },
+      8: { cellWidth: 119, overflow: 'linebreak' },
     },
     didParseCell: function(data) {
       if (data.section === 'body' && data.row.index === detailTotalsIndex) {
