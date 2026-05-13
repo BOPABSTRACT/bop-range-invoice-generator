@@ -24,6 +24,16 @@ function formatDate(val: unknown): string {
   return String(val)
 }
 
+function normalizeInvoiceDate(input: string): string {
+  // Try to parse whatever the user typed and reformat as "Month D, YYYY"
+  const d = new Date(input)
+  if (!isNaN(d.getTime())) {
+    return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+  }
+  // If it can't be parsed, return as-is
+  return input
+}
+
 function sanitize(name: string): string {
   return name.replace(/[^a-zA-Z0-9_\-. #]/g, '_').trim()
 }
@@ -83,6 +93,7 @@ async function buildInvoicePdf(
   excelBuffer: Buffer,
   emailText: string,
   matchedReceiptBuffer: Buffer | null,
+  invoiceDateOverride: string,
 ): Promise<Buffer> {
   const { jsPDF } = await import('jspdf')
   const autoTable = (await import('jspdf-autotable')).default
@@ -95,7 +106,7 @@ async function buildInvoicePdf(
 
   const summaryRows = XLSX.utils.sheet_to_json(summarySheet, { header: 1, defval: '' }) as unknown[][]
   const invoiceNum = String((summaryRows[7] as unknown[])?.[5] ?? '')
-  const invoiceDate = String((summaryRows[7] as unknown[])?.[1] ?? '')
+  const invoiceDate = invoiceDateOverride || String((summaryRows[7] as unknown[])?.[1] ?? '')
   const period = String((summaryRows[15] as unknown[])?.[1] ?? '')
 
   const headerRow = summaryRows[17] as string[]
@@ -437,6 +448,8 @@ export async function POST(req: NextRequest) {
     const excelFiles = formData.getAll('excel') as File[]
     const receiptFiles = formData.getAll('receipts') as File[]
     const emailFile = formData.get('email') as File
+    const rawDate = (formData.get('invoiceDate') as string) || ''
+    const invoiceDateOverride = normalizeInvoiceDate(rawDate)
 
     if (!excelFiles.length) return NextResponse.json({ error: 'No Excel files uploaded' }, { status: 400 })
     if (!emailFile) return NextResponse.json({ error: 'No email PDF uploaded' }, { status: 400 })
@@ -498,7 +511,7 @@ export async function POST(req: NextRequest) {
       const matchedReceipt = matchReceipt(invoiceNum, receiptData)
 
       try {
-        const pdfBuffer = await buildInvoicePdf(excelBuffer, emailText, matchedReceipt)
+        const pdfBuffer = await buildInvoicePdf(excelBuffer, emailText, matchedReceipt, invoiceDateOverride)
         zip.file(`${outputName}.pdf`, pdfBuffer)
       } catch (err) {
         return NextResponse.json({ error: `Failed for invoice ${invoiceNum}: ${String(err)}` }, { status: 500 })
