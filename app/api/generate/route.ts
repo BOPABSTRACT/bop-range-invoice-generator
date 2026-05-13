@@ -25,12 +25,10 @@ function formatDate(val: unknown): string {
 }
 
 function normalizeInvoiceDate(input: string): string {
-  // Try to parse whatever the user typed and reformat as "Month D, YYYY"
   const d = new Date(input)
   if (!isNaN(d.getTime())) {
     return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
   }
-  // If it can't be parsed, return as-is
   return input
 }
 
@@ -288,14 +286,32 @@ async function buildInvoicePdf(
     head: tableHead,
     body: tableBody,
     theme: 'grid',
-    styles: { font: 'helvetica', fontSize: 8, textColor: black, fillColor: white, cellPadding: 4, lineColor: black, lineWidth: 0.3 },
-    headStyles: { textColor: black, fillColor: headerBg, fontStyle: 'bold', halign: 'center' },
+    styles: {
+      font: 'helvetica',
+      fontSize: 8,
+      textColor: black,
+      fillColor: white,
+      cellPadding: 4,
+      lineColor: black,
+      lineWidth: 0.3,
+      overflow: 'linebreak',
+      cellWidth: 'wrap',
+    },
+    headStyles: {
+      textColor: black,
+      fillColor: headerBg,
+      fontStyle: 'bold',
+      halign: 'center',
+      overflow: 'linebreak',
+    },
     columnStyles: {
-      1: { halign: 'center' },
-      2: { halign: 'right' },
-      3: { halign: 'right' },
-      4: { halign: 'right' },
-      5: { halign: 'right' },
+      0: { cellWidth: 70 },
+      1: { halign: 'center', cellWidth: 40 },
+      2: { halign: 'right', cellWidth: 65 },
+      3: { halign: 'right', cellWidth: 80 },
+      4: { halign: 'right', cellWidth: 65 },
+      5: { halign: 'right', cellWidth: 65 },
+      6: { cellWidth: 'auto', overflow: 'linebreak' },
     },
     didParseCell: function(data) {
       if (data.section === 'body' && data.row.index === totalsRowIndex) {
@@ -374,7 +390,7 @@ async function buildInvoicePdf(
         fmtCurrency(row[7]),
         fmtCurrency(row[8]),
         fmtCurrency(row[9]),
-        String(row[10] ?? '').substring(0, 60),
+        String(row[10] ?? ''),
       ]
     })
     detailBody.push(['Totals', '', '', '', '', totalDays.toFixed(2), fmtCurrency(totalLaborTotal), fmtCurrency(totalCopies), fmtCurrency(totalTotal), ''])
@@ -391,7 +407,7 @@ async function buildInvoicePdf(
         Number(row[5] ?? 0).toFixed(2),
         fmtCurrency(row[7]),
         fmtCurrency(row[8]),
-        String(row[9] ?? '').substring(0, 60),
+        String(row[9] ?? ''),
       ]
     })
     detailBody.push(['Totals', '', '', '', '', totalDays.toFixed(2), fmtCurrency(totalLaborTotal), fmtCurrency(totalTotal), ''])
@@ -404,13 +420,34 @@ async function buildInvoicePdf(
     head: detailHead,
     body: detailBody,
     theme: 'grid',
-    styles: { font: 'helvetica', fontSize: 7.5, textColor: black, fillColor: white, cellPadding: 3, lineColor: black, lineWidth: 0.3 },
-    headStyles: { textColor: black, fillColor: headerBg, fontStyle: 'bold', halign: 'center' },
+    styles: {
+      font: 'helvetica',
+      fontSize: 7.5,
+      textColor: black,
+      fillColor: white,
+      cellPadding: 3,
+      lineColor: black,
+      lineWidth: 0.3,
+      overflow: 'linebreak',
+      cellWidth: 'wrap',
+    },
+    headStyles: {
+      textColor: black,
+      fillColor: headerBg,
+      fontStyle: 'bold',
+      halign: 'center',
+      overflow: 'linebreak',
+    },
     columnStyles: {
-      5: { halign: 'center' },
-      6: { halign: 'right' },
-      7: { halign: 'right' },
-      8: { halign: 'right' },
+      0: { cellWidth: 55 },
+      1: { cellWidth: 45 },
+      2: { cellWidth: 60, overflow: 'linebreak' },
+      3: { cellWidth: 60, overflow: 'linebreak' },
+      4: { cellWidth: 55, overflow: 'linebreak' },
+      5: { halign: 'center', cellWidth: 28 },
+      6: { halign: 'right', cellWidth: 48 },
+      7: { halign: 'right', cellWidth: 48 },
+      8: { halign: 'right', cellWidth: 'auto', overflow: 'linebreak' },
     },
     didParseCell: function(data) {
       if (data.section === 'body' && data.row.index === detailTotalsIndex) {
