@@ -147,7 +147,7 @@ export default function Home() {
             Generate Invoices
           </h1>
           <p style={{ color: '#888', fontSize: 15, margin: 0, lineHeight: 1.6 }}>
-            Upload your Excel invoice files, any LANDEX receipt PDFs, and the billing email PDF.
+            Upload your Excel invoice files, any receipt PDFs, and the billing email PDF.
             One complete PDF invoice will be generated per Excel file.
           </p>
         </div>
@@ -163,7 +163,7 @@ export default function Home() {
           />
         </Section>
 
-        <Section number="2" title="Upload LANDEX Receipt PDFs (Optional)">
+        <Section number="2" title="Upload Receipt PDFs (Optional)">
           <MultiUploadBox
             label="Drop receipt PDFs here or click to browse — optional"
             accept=".pdf"
@@ -240,7 +240,7 @@ export default function Home() {
             Each Excel file becomes one invoice PDF with up to 3 pages:<br />
             <span style={{ color: '#c8a96e' }}>Page 1</span> — Invoice summary (from Excel Summary sheet)<br />
             <span style={{ color: '#c8a96e' }}>Page 2</span> — Work detail log (from Excel Work Detail sheet)<br />
-            <span style={{ color: '#c8a96e' }}>Page 3+</span> — LANDEX receipt appended if matched by invoice number
+            <span style={{ color: '#c8a96e' }}>Page 3+</span> — Receipt appended if matched by invoice number
           </div>
         </div>
       </div>
