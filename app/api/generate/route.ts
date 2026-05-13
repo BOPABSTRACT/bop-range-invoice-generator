@@ -28,6 +28,10 @@ function sanitize(name: string): string {
   return name.replace(/[^a-zA-Z0-9_\-. ]/g, '_').trim()
 }
 
+function cleanPid(val: string): string {
+  return val.replace(/^[-\s]+/, '').trim()
+}
+
 function parseEmailPdf(text: string): Map<string, { pid: string; unit: string; county: string; type: string }> {
   const map = new Map<string, { pid: string; unit: string; county: string; type: string }>()
 
@@ -42,13 +46,13 @@ function parseEmailPdf(text: string): Map<string, { pid: string; unit: string; c
 
   const leaseBlocks = text.matchAll(/(\d{10}[A-Z]?)\s*[-–]\s*TPN\s*([\d\-]+)/g)
   for (const match of leaseBlocks) {
-    map.set(match[1], { pid: match[2], unit, county, type })
+    map.set(match[1], { pid: cleanPid(match[2]), unit, county, type })
   }
 
   const altBlocks = text.matchAll(/(\d{10}[A-Z]?)[^\n]*?([\d]{3}-[\d]{3}-[\d]{2}-[\d]{2}-[\d]{4}-[\d]{2})/g)
   for (const match of altBlocks) {
     if (!map.has(match[1])) {
-      map.set(match[1], { pid: match[2], unit, county, type })
+      map.set(match[1], { pid: cleanPid(match[2]), unit, county, type })
     }
   }
 
@@ -56,7 +60,7 @@ function parseEmailPdf(text: string): Map<string, { pid: string; unit: string; c
     const leaseNums = [...text.matchAll(/\b(\d{10}[A-Z]?)\b/g)].map(m => m[1])
     const pids = [...text.matchAll(/([\d]{3}-[\d]{3}-[\d]{2}-[\d]{2}-[\d]{4}-[\d]{2})/g)].map(m => m[1])
     leaseNums.forEach((lease, i) => {
-      map.set(lease, { pid: pids[i] || '', unit, county, type })
+      map.set(lease, { pid: cleanPid(pids[i] || ''), unit, county, type })
     })
   }
 
@@ -111,18 +115,20 @@ async function buildInvoicePdf(
   let county = 'Washington'
   let workType = 'Deed Search'
 
+  // Get lease number and PID from Work Detail sheet
   for (const row of detailRows) {
     const r = row as unknown[]
     if (r[4] && String(r[4]).trim()) {
       leaseNo = String(r[4]).trim()
-      pid = String(r[3] ?? '').trim()
+      pid = cleanPid(String(r[3] ?? '').trim())
       break
     }
   }
 
+  // Override with email map data if available
   const emailInfo = emailMap.get(leaseNo)
   if (emailInfo) {
-    if (emailInfo.pid) pid = emailInfo.pid
+    if (emailInfo.pid) pid = cleanPid(emailInfo.pid)
     if (emailInfo.unit) unit = emailInfo.unit
     if (emailInfo.county) county = emailInfo.county
     if (emailInfo.type) workType = emailInfo.type
@@ -301,7 +307,7 @@ async function buildInvoicePdf(
         String(row[0] ?? ''),
         formatDate(row[1]),
         String(row[2] ?? ''),
-        String(row[3] ?? ''),
+        cleanPid(String(row[3] ?? '')),
         String(row[4] ?? ''),
         Number(row[5] ?? 0).toFixed(2),
         `$${Number(row[7] ?? 0).toFixed(2)}`,
@@ -318,7 +324,7 @@ async function buildInvoicePdf(
         String(row[0] ?? ''),
         formatDate(row[1]),
         String(row[2] ?? ''),
-        String(row[3] ?? ''),
+        cleanPid(String(row[3] ?? '')),
         String(row[4] ?? ''),
         Number(row[5] ?? 0).toFixed(2),
         `$${Number(row[7] ?? 0).toFixed(2)}`,
