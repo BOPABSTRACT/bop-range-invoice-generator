@@ -126,9 +126,10 @@ async function buildInvoicePdf(
   }
 
   // Override with email map data if available
+  // Only replace PID from email if it's longer/more complete than what we have
   const emailInfo = emailMap.get(leaseNo)
   if (emailInfo) {
-    if (emailInfo.pid) pid = cleanPid(emailInfo.pid)
+    if (emailInfo.pid && cleanPid(emailInfo.pid).length > pid.length) pid = cleanPid(emailInfo.pid)
     if (emailInfo.unit) unit = emailInfo.unit
     if (emailInfo.county) county = emailInfo.county
     if (emailInfo.type) workType = emailInfo.type
