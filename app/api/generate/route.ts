@@ -107,7 +107,6 @@ async function buildInvoicePdf(
     if (row && row[0] && String(row[0]).trim()) brokerRows.push(row)
   }
 
-  // Separate data rows from totals row
   const brokerDataRows = brokerRows.filter(r => String((r as unknown[])[0]).toLowerCase() !== 'totals')
   const brokerTotalsRow = brokerRows.find(r => String((r as unknown[])[0]).toLowerCase() === 'totals')
 
@@ -230,9 +229,9 @@ async function buildInvoicePdf(
 
   const tableStartY = Math.max(ly + 20, ry + 20)
 
-  // Build broker table body (data rows only)
   let tableHead: string[][]
   let tableBody: string[][]
+  const totalCol = hasCopiesCol ? 5 : 4
 
   if (hasCopiesCol) {
     tableHead = [['Broker', '# Days', 'Amt. Per Day', 'Total Prof. Services', 'Copies', 'TOTAL', 'Project']]
@@ -248,18 +247,9 @@ async function buildInvoicePdf(
         `Lease No. ${leaseNo}`,
       ]
     })
-    // Add totals row
     if (brokerTotalsRow) {
       const t = brokerTotalsRow as unknown[]
-      tableBody.push([
-        'Totals',
-        Number(t[1] ?? 0).toFixed(3),
-        '',
-        fmtCurrency(t[3]),
-        fmtCurrency(t[4]),
-        fmtCurrency(t[5]),
-        '',
-      ])
+      tableBody.push(['Totals', Number(t[1] ?? 0).toFixed(3), '', fmtCurrency(t[3]), fmtCurrency(t[4]), fmtCurrency(t[5]), ''])
     }
   } else {
     tableHead = [['Broker', '# Days', 'Amt. Per Day', 'Total Prof. Services', 'TOTAL', 'Project']]
@@ -276,14 +266,7 @@ async function buildInvoicePdf(
     })
     if (brokerTotalsRow) {
       const t = brokerTotalsRow as unknown[]
-      tableBody.push([
-        'Totals',
-        Number(t[1] ?? 0).toFixed(3),
-        '',
-        fmtCurrency(t[3]),
-        fmtCurrency(t[4]),
-        '',
-      ])
+      tableBody.push(['Totals', Number(t[1] ?? 0).toFixed(3), '', fmtCurrency(t[3]), fmtCurrency(t[4]), ''])
     }
   }
 
@@ -294,10 +277,7 @@ async function buildInvoicePdf(
     head: tableHead,
     body: tableBody,
     theme: 'grid',
-    styles: {
-      font: 'helvetica', fontSize: 8, textColor: black,
-      fillColor: white, cellPadding: 4, lineColor: black, lineWidth: 0.3,
-    },
+    styles: { font: 'helvetica', fontSize: 8, textColor: black, fillColor: white, cellPadding: 4, lineColor: black, lineWidth: 0.3 },
     headStyles: { textColor: black, fillColor: headerBg, fontStyle: 'bold', halign: 'center' },
     columnStyles: {
       1: { halign: 'center' },
@@ -309,7 +289,9 @@ async function buildInvoicePdf(
     didParseCell: function(data) {
       if (data.section === 'body' && data.row.index === totalsRowIndex) {
         data.cell.styles.fontStyle = 'bold'
-        data.cell.styles.fillColor = totalsBg
+        if (data.column.index === totalCol) {
+          data.cell.styles.fillColor = totalsBg
+        }
       }
     },
     margin: { left: 40, right: 40 },
@@ -339,13 +321,11 @@ async function buildInvoicePdf(
       )
     : false
 
-  // Separate detail data rows from totals
   const detailDataRows = detailRows.filter(r => {
     const row = r as unknown[]
     return row[0] && String(row[0]).trim() !== ''
   })
 
-  // Calculate totals for work detail
   let totalDays = 0
   let totalLaborTotal = 0
   let totalCopies = 0
@@ -367,6 +347,7 @@ async function buildInvoicePdf(
 
   let detailHead: string[][]
   let detailBody: string[][]
+  const detailTotalCol = hasDetailCopies ? 8 : 7
 
   if (hasDetailCopies) {
     detailHead = [['Landman', 'Date', 'Prospect', 'Legal', 'Lease No.', 'Days', 'Labor Total', 'Copies', 'Total', 'Description']]
@@ -385,14 +366,7 @@ async function buildInvoicePdf(
         String(row[10] ?? '').substring(0, 60),
       ]
     })
-    detailBody.push([
-      'Totals', '', '', '', '',
-      totalDays.toFixed(2),
-      fmtCurrency(totalLaborTotal),
-      fmtCurrency(totalCopies),
-      fmtCurrency(totalTotal),
-      '',
-    ])
+    detailBody.push(['Totals', '', '', '', '', totalDays.toFixed(2), fmtCurrency(totalLaborTotal), fmtCurrency(totalCopies), fmtCurrency(totalTotal), ''])
   } else {
     detailHead = [['Landman', 'Date', 'Prospect', 'Legal', 'Lease No.', 'Days', 'Labor Total', 'Total', 'Description']]
     detailBody = detailDataRows.map(r => {
@@ -409,13 +383,7 @@ async function buildInvoicePdf(
         String(row[9] ?? '').substring(0, 60),
       ]
     })
-    detailBody.push([
-      'Totals', '', '', '', '',
-      totalDays.toFixed(2),
-      fmtCurrency(totalLaborTotal),
-      fmtCurrency(totalTotal),
-      '',
-    ])
+    detailBody.push(['Totals', '', '', '', '', totalDays.toFixed(2), fmtCurrency(totalLaborTotal), fmtCurrency(totalTotal), ''])
   }
 
   const detailTotalsIndex = detailBody.length - 1
@@ -425,10 +393,7 @@ async function buildInvoicePdf(
     head: detailHead,
     body: detailBody,
     theme: 'grid',
-    styles: {
-      font: 'helvetica', fontSize: 7.5, textColor: black,
-      fillColor: white, cellPadding: 3, lineColor: black, lineWidth: 0.3,
-    },
+    styles: { font: 'helvetica', fontSize: 7.5, textColor: black, fillColor: white, cellPadding: 3, lineColor: black, lineWidth: 0.3 },
     headStyles: { textColor: black, fillColor: headerBg, fontStyle: 'bold', halign: 'center' },
     columnStyles: {
       5: { halign: 'center' },
@@ -439,7 +404,9 @@ async function buildInvoicePdf(
     didParseCell: function(data) {
       if (data.section === 'body' && data.row.index === detailTotalsIndex) {
         data.cell.styles.fontStyle = 'bold'
-        data.cell.styles.fillColor = totalsBg
+        if (data.column.index === detailTotalCol) {
+          data.cell.styles.fillColor = totalsBg
+        }
       }
     },
     margin: { left: 40, right: 40 },
@@ -500,7 +467,6 @@ export async function POST(req: NextRequest) {
       const invoiceNum = String((rows[7] as unknown[])?.[5] ?? '').trim() ||
         (excelFile.name.match(/(\d{5,})/)?.[1] ?? 'UNKNOWN')
 
-      // Get unit and pid for filename from Work Detail
       const detailRows = detailWs
         ? (XLSX.utils.sheet_to_json(detailWs, { header: 1, defval: '' }) as unknown[][]).slice(2)
         : []
@@ -516,13 +482,11 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Parse email for unit and type
       const emailMap = parseEmailPdf(emailText)
       const emailInfo = emailMap.get(filenameLeaseNo)
       const filenameUnit = emailInfo?.unit || ''
       const filenameType = emailInfo?.type || 'Deed Search'
 
-      // Build filename: #13923 - Jeffries Elisabeth H-K - 540-010-04-02-0005-00 - Deed Search
       const nameParts = [
         `#${invoiceNum}`,
         filenameUnit || 'Unknown',
