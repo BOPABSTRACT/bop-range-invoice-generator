@@ -11,6 +11,7 @@ export default function Home() {
   const [excelFiles, setExcelFiles] = useState<File[]>([])
   const [receiptFiles, setReceiptFiles] = useState<File[]>([])
   const [emailFile, setEmailFile] = useState<File | null>(null)
+  const [invoiceDate, setInvoiceDate] = useState('')
   const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
   const [message, setMessage] = useState('')
   const excelRef = useRef<HTMLInputElement>(null)
@@ -37,6 +38,11 @@ export default function Home() {
       setStatus('error')
       return
     }
+    if (!invoiceDate.trim()) {
+      setMessage('Please enter an invoice date.')
+      setStatus('error')
+      return
+    }
     setStatus('loading')
     setMessage('Generating invoices...')
 
@@ -44,6 +50,7 @@ export default function Home() {
     excelFiles.forEach(f => formData.append('excel', f))
     receiptFiles.forEach(f => formData.append('receipts', f))
     formData.append('email', emailFile)
+    formData.append('invoiceDate', invoiceDate.trim())
 
     try {
       const res = await fetch('/api/generate', { method: 'POST', body: formData })
@@ -181,7 +188,25 @@ export default function Home() {
           />
         </Section>
 
-        <Section number="4" title="Generate Invoices">
+        <Section number="4" title="Invoice Date">
+          <div style={{ fontSize: 13, color: '#888', marginBottom: 10 }}>
+            Enter the date to appear on all invoices (e.g. May 12, 2026 or 5/12/2026)
+          </div>
+          <input
+            type="text"
+            placeholder="e.g. May 12, 2026"
+            value={invoiceDate}
+            onChange={e => setInvoiceDate(e.target.value)}
+            style={{
+              width: '100%', padding: '12px 16px', background: '#0d0f14',
+              border: `1px solid ${!invoiceDate && status === 'error' ? '#8b2020' : '#2a2a3a'}`,
+              borderRadius: 6, color: '#e8e0d0', fontSize: 15,
+              fontFamily: "'Georgia', serif", boxSizing: 'border-box', outline: 'none',
+            }}
+          />
+        </Section>
+
+        <Section number="5" title="Generate Invoices">
           <button
             onClick={handleGenerate}
             disabled={status === 'loading'}
@@ -215,8 +240,7 @@ export default function Home() {
             Each Excel file becomes one invoice PDF with up to 3 pages:<br />
             <span style={{ color: '#c8a96e' }}>Page 1</span> — Invoice summary (from Excel Summary sheet)<br />
             <span style={{ color: '#c8a96e' }}>Page 2</span> — Work detail log (from Excel Work Detail sheet)<br />
-            <span style={{ color: '#c8a96e' }}>Page 3+</span> — LANDEX receipt appended if matched by invoice number<br />
-            <span style={{ color: '#c8a96e' }}>Final pages</span> — Billing email appended to every invoice
+            <span style={{ color: '#c8a96e' }}>Page 3+</span> — LANDEX receipt appended if matched by invoice number
           </div>
         </div>
       </div>
