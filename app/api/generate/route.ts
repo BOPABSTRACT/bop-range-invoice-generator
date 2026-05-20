@@ -52,7 +52,13 @@ function extractAllPids(s: string): string[] {
   return matches ? matches.map(cleanPid) : []
 }
 
-type EmailEntry = { pid: string; unit: string; county: string; type: string; lease: string }
+type EmailEntry = {
+  pids: string[]      // ALL pids found in the block
+  unit: string
+  county: string
+  type: string
+  lease: string
+}
 
 function parseEmailPdf(text: string): {
   byLease: Map<string, EmailEntry>
@@ -62,33 +68,37 @@ function parseEmailPdf(text: string): {
   const byPid = new Map<string, EmailEntry>()
 
   // Flatten line breaks so multi-line blocks parse as one string.
-  // (Email PDFs frequently wrap long TPN lists across multiple lines.)
   const flat = text.replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ')
 
-  // Anchor on each "(Unit Name)" mention, then walk backward to find the
-  // county/work-type/lease/PID region that belongs to it. This is more
-  // resilient than one giant regex because the PID region is messy
-  // (commas, semicolons, "p/o", "and", line breaks, lease suffixes, etc.).
-  //
-  // Pattern (loosened):
-  //   [County] County - [Work Type] - (Lease [Lease#(+suffix)] | Unleased) - TPN [...PID region...] ([Unit])
-  const blockRegex = /([A-Z][a-zA-Z]+)\s+County\s*[-–]\s*([^-–\n]+?)\s*[-–]\s*(?:Lease\s+([A-Za-z0-9\-]+)|Unleased)\s*[-–]\s*TPN\s+([^()]+?)\s*\(([^)]+)\)/g
+  // Match the structural header of a block:
+  //   [County] County - [Work Type] - (Lease [Lease#(+suffix)] | Unleased) - ...
+  // Then capture everything up to the next "Please follow" / "Washington County -" / "Note:" / end-of-string.
+  // Within that captured tail we extract:
+  //   - the unit name from the FIRST parenthesized phrase, regardless of position
+  //   - all PIDs
+  const blockRegex = /([A-Z][a-zA-Z]+)\s+County\s*[-–]\s*([^-–\n]+?)\s*[-–]\s*(?:Lease\s+([A-Za-z0-9\-]+)|Unleased)\b([\s\S]*?)(?=Please follow|[A-Z][a-zA-Z]+\s+County\s*[-–]|Note:|Thank You|$)/g
 
   for (const match of flat.matchAll(blockRegex)) {
     const county = match[1].trim()
     const type = match[2].trim()
     const lease = (match[3] ?? '').trim()
-    const pidRegion = match[4]
-    const unit = match[5].trim()
+    const tail = match[4] || ''
 
-    const pids = extractAllPids(pidRegion)
-    const primaryPid = pids[0] || ''
+    // Unit = first (...) group in the tail. Skip empty parens.
+    let unit = ''
+    const parenMatches = tail.match(/\(([^)]+)\)/g)
+    if (parenMatches) {
+      for (const p of parenMatches) {
+        const inner = p.slice(1, -1).trim()
+        if (inner) { unit = inner; break }
+      }
+    }
 
-    const entry: EmailEntry = { pid: primaryPid, unit, county, type, lease }
+    const pids = extractAllPids(tail)
+
+    const entry: EmailEntry = { pids, unit, county, type, lease }
 
     if (lease) byLease.set(lease, entry)
-    // Index by EVERY PID in the block, so multi-parcel blocks can be found
-    // by any of their PIDs.
     for (const p of pids) {
       if (!byPid.has(p)) byPid.set(p, entry)
     }
@@ -111,19 +121,14 @@ function lookupEmailInfo(
   byLease: Map<string, EmailEntry>,
   byPid: Map<string, EmailEntry>,
 ): EmailEntry | undefined {
-  // 1) Try lease exactly as it appears in Excel
   if (excelLease) {
     const hit = byLease.get(excelLease.trim())
     if (hit) return hit
-  }
-  // 2) Try lease with whitespace/case normalized
-  if (excelLease) {
-    const norm = excelLease.trim()
+    const norm = excelLease.trim().toLowerCase()
     for (const [k, v] of byLease) {
-      if (k.toLowerCase() === norm.toLowerCase()) return v
+      if (k.toLowerCase() === norm) return v
     }
   }
-  // 3) Fallback: try EVERY PID in the Excel PID cell (handles "PID1_PID2", "PID1; PID2", etc.)
   for (const p of extractAllPids(excelPidCell)) {
     const hit = byPid.get(p)
     if (hit) return hit
@@ -168,8 +173,8 @@ async function buildInvoicePdf(
     : []
 
   let leaseNo = ''
-  let pidCell = '' // raw cell value from Excel (may contain multiple PIDs)
-  let pid = ''    // first PID for display purposes
+  let pidCell = ''
+  let pid = ''
   let unit = ''
   let county = 'Washington'
   let workType = 'Deed Search'
@@ -358,7 +363,7 @@ async function buildInvoicePdf(
   doc.setFont('helvetica', 'italic')
   doc.text('Please contact our accounting department with any questions regarding invoices', 306, finalY, { align: 'center' })
 
-  // ============ PAGE 2: WORK DETAIL (portrait, font size 7, tight cols) ============
+  // ============ PAGE 2: WORK DETAIL ============
   doc.addPage()
   doc.setFillColor(...white)
   doc.rect(0, 0, 612, 792, 'F')
@@ -443,9 +448,6 @@ async function buildInvoicePdf(
 
   const detailTotalsIndex = detailBody.length - 1
 
-  // Column widths tuned to fit portrait 532pt usable width (612 - 40 margins each side)
-  // With copies: 55+45+55+65+55+28+48+48+48+85 = 532
-  // Without copies: 55+45+55+65+55+28+55+55+119 = 532
   autoTable(doc, {
     startY: 60,
     head: detailHead,
@@ -549,7 +551,6 @@ export async function POST(req: NextRequest) {
       receiptData.push({ name: r.name, buffer: Buffer.from(await r.arrayBuffer()) })
     }
 
-    // Parse email ONCE up front and reuse for every invoice in the batch.
     const { byLease, byPid } = parseEmailPdf(emailText)
 
     const zip = new JSZip()
@@ -581,12 +582,21 @@ export async function POST(req: NextRequest) {
       const emailInfo = lookupEmailInfo(filenameLeaseNo, filenamePidCell, byLease, byPid)
       const filenameUnit = emailInfo?.unit || ''
       const filenameType = emailInfo?.type || 'Deed Search'
-      const filenamePid = extractAllPids(filenamePidCell)[0] || filenamePidCell
+
+      // Filename PID: take the FIRST pid only. Append " et al" if multiple PIDs
+      // are present in EITHER the Excel cell OR the matched email block.
+      const excelPids = extractAllPids(filenamePidCell)
+      const emailPids = emailInfo?.pids || []
+      const firstPid = excelPids[0] || emailPids[0] || ''
+      const hasMultiple = excelPids.length > 1 || emailPids.length > 1
+      const filenamePid = firstPid
+        ? (hasMultiple ? `${firstPid} et al` : firstPid)
+        : (filenamePidCell || 'Unknown')
 
       const nameParts = [
         `#${invoiceNum}`,
         filenameUnit || 'Unknown',
-        filenamePid || 'Unknown',
+        filenamePid,
         filenameType,
       ]
       const outputName = sanitize(nameParts.join(' - '))
