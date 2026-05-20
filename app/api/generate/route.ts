@@ -45,7 +45,7 @@ function fmtCurrency(val: unknown): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
 }
 
-// Extracts every PID-looking token from a string (handles "p/o", commas, semicolons, "and", etc.)
+// Extracts every PID-looking token from a string.
 function extractAllPids(s: string): string[] {
   if (!s) return []
   const matches = s.match(/\d{3}-\d{3}-\d{2}-\d{2}-\d{4}-\d{2}/g)
@@ -53,7 +53,6 @@ function extractAllPids(s: string): string[] {
 }
 
 // Fix names that got broken by PDF text extraction (e.g. "S tevenson" -> "Stevenson").
-// Joins a single-uppercase-letter "word" with the next word when followed by lowercase.
 function fixBrokenName(s: string): string {
   return s
     .replace(/\b([A-Z])\s+([a-z]{2,})/g, '$1$2')
@@ -80,15 +79,11 @@ function parseEmailPdf(text: string): {
   const flat = text.replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ')
 
   // Split into segments at "Please follow the Dropbox link" boundaries.
-  // Each segment is one logical "block" describing one invoice's work.
   // The first segment (before any "Please follow") is the email header — discard it.
   const segments = flat.split(/Please follow the Dropbox link below for the completed abstracts on/i)
-  // segments[0] = preamble (subject, greeting). Drop it.
   for (let i = 1; i < segments.length; i++) {
     const seg = segments[i]
 
-    // Header pattern within the segment:
-    //   [County] County - [Work Type] - (Lease [Lease#] | Unleased) - ...
     const headerMatch = seg.match(
       /([A-Z][a-zA-Z]+)\s+County\s*[-–]\s*([^-–]+?)\s*[-–]\s*(?:Lease\s+([A-Za-z0-9\-]+)|Unleased)\b/
     )
@@ -99,7 +94,7 @@ function parseEmailPdf(text: string): {
     const lease = (headerMatch[3] ?? '').trim()
 
     // Unit = first non-empty parenthesized phrase anywhere in the segment.
-    // Skip parens that look like URL fragments (contain "://", "dropbox", etc.).
+    // Skip parens that look like URL fragments.
     let unit = ''
     const parenMatches = seg.match(/\(([^)]+)\)/g)
     if (parenMatches) {
@@ -112,7 +107,6 @@ function parseEmailPdf(text: string): {
       }
     }
 
-    // All PIDs found in the segment.
     const pids = extractAllPids(seg)
 
     const entry: EmailEntry = { pids, unit, county, type, lease }
@@ -601,12 +595,12 @@ export async function POST(req: NextRequest) {
       const filenameUnit = emailInfo?.unit || ''
       const filenameType = emailInfo?.type || 'Deed Search'
 
-      // Filename PID: take the FIRST pid only. Append " et al" if multiple PIDs
-      // are present in EITHER the Excel cell OR the matched email block.
-      const excelPids = extractAllPids(filenamePidCell)
+      // Filename PID: take the FIRST pid from the email block (authoritative).
+      // Append " et al" ONLY if the email block lists more than one PID.
       const emailPids = emailInfo?.pids || []
-      const firstPid = excelPids[0] || emailPids[0] || ''
-      const hasMultiple = excelPids.length > 1 || emailPids.length > 1
+      const excelPids = extractAllPids(filenamePidCell)
+      const firstPid = emailPids[0] || excelPids[0] || ''
+      const hasMultiple = emailPids.length > 1
       const filenamePid = firstPid
         ? (hasMultiple ? `${firstPid} et al` : firstPid)
         : (filenamePidCell || 'Unknown')
