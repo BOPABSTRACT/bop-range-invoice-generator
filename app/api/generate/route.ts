@@ -52,8 +52,17 @@ function extractAllPids(s: string): string[] {
   return matches ? matches.map(cleanPid) : []
 }
 
+// Fix names that got broken by PDF text extraction (e.g. "S tevenson" -> "Stevenson").
+// Joins a single-uppercase-letter "word" with the next word when followed by lowercase.
+function fixBrokenName(s: string): string {
+  return s
+    .replace(/\b([A-Z])\s+([a-z]{2,})/g, '$1$2')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 type EmailEntry = {
-  pids: string[]      // ALL pids found in the block
+  pids: string[]
   unit: string
   county: string
   type: string
@@ -67,34 +76,44 @@ function parseEmailPdf(text: string): {
   const byLease = new Map<string, EmailEntry>()
   const byPid = new Map<string, EmailEntry>()
 
-  // Flatten line breaks so multi-line blocks parse as one string.
+  // Flatten the document so paragraph wraps don't break our patterns.
   const flat = text.replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ')
 
-  // Match the structural header of a block:
-  //   [County] County - [Work Type] - (Lease [Lease#(+suffix)] | Unleased) - ...
-  // Then capture everything up to the next "Please follow" / "Washington County -" / "Note:" / end-of-string.
-  // Within that captured tail we extract:
-  //   - the unit name from the FIRST parenthesized phrase, regardless of position
-  //   - all PIDs
-  const blockRegex = /([A-Z][a-zA-Z]+)\s+County\s*[-–]\s*([^-–\n]+?)\s*[-–]\s*(?:Lease\s+([A-Za-z0-9\-]+)|Unleased)\b([\s\S]*?)(?=Please follow|[A-Z][a-zA-Z]+\s+County\s*[-–]|Note:|Thank You|$)/g
+  // Split into segments at "Please follow the Dropbox link" boundaries.
+  // Each segment is one logical "block" describing one invoice's work.
+  // The first segment (before any "Please follow") is the email header — discard it.
+  const segments = flat.split(/Please follow the Dropbox link below for the completed abstracts on/i)
+  // segments[0] = preamble (subject, greeting). Drop it.
+  for (let i = 1; i < segments.length; i++) {
+    const seg = segments[i]
 
-  for (const match of flat.matchAll(blockRegex)) {
-    const county = match[1].trim()
-    const type = match[2].trim()
-    const lease = (match[3] ?? '').trim()
-    const tail = match[4] || ''
+    // Header pattern within the segment:
+    //   [County] County - [Work Type] - (Lease [Lease#] | Unleased) - ...
+    const headerMatch = seg.match(
+      /([A-Z][a-zA-Z]+)\s+County\s*[-–]\s*([^-–]+?)\s*[-–]\s*(?:Lease\s+([A-Za-z0-9\-]+)|Unleased)\b/
+    )
+    if (!headerMatch) continue
 
-    // Unit = first (...) group in the tail. Skip empty parens.
+    const county = headerMatch[1].trim()
+    const type = headerMatch[2].trim()
+    const lease = (headerMatch[3] ?? '').trim()
+
+    // Unit = first non-empty parenthesized phrase anywhere in the segment.
+    // Skip parens that look like URL fragments (contain "://", "dropbox", etc.).
     let unit = ''
-    const parenMatches = tail.match(/\(([^)]+)\)/g)
+    const parenMatches = seg.match(/\(([^)]+)\)/g)
     if (parenMatches) {
       for (const p of parenMatches) {
         const inner = p.slice(1, -1).trim()
-        if (inner) { unit = inner; break }
+        if (!inner) continue
+        if (/https?:|dropbox|\.com|\.pdf/i.test(inner)) continue
+        unit = fixBrokenName(inner)
+        break
       }
     }
 
-    const pids = extractAllPids(tail)
+    // All PIDs found in the segment.
+    const pids = extractAllPids(seg)
 
     const entry: EmailEntry = { pids, unit, county, type, lease }
 
@@ -114,7 +133,6 @@ function matchReceipt(invoiceNum: string, receiptFiles: { name: string; buffer: 
   return null
 }
 
-// Try every Excel-side identifier against the email maps and return the first hit.
 function lookupEmailInfo(
   excelLease: string,
   excelPidCell: string,
