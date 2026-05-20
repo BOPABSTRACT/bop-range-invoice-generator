@@ -46,9 +46,13 @@ function fmtCurrency(val: unknown): string {
 }
 
 // Extracts every PID-looking token from a string.
+// Also handles PIDs broken across line wraps (e.g. "460-016-00-00-0036- 05")
+// by first collapsing any whitespace inside potential PID sequences.
 function extractAllPids(s: string): string[] {
   if (!s) return []
-  const matches = s.match(/\d{3}-\d{3}-\d{2}-\d{2}-\d{4}-\d{2}/g)
+  // Repair PIDs broken by line wraps: a hyphen followed by whitespace then digits.
+  const repaired = s.replace(/(\d-)\s+(\d)/g, '$1$2')
+  const matches = repaired.match(/\d{3}-\d{3}-\d{2}-\d{2}-\d{4}-\d{2}/g)
   return matches ? matches.map(cleanPid) : []
 }
 
@@ -78,7 +82,12 @@ function parseEmailPdf(text: string): {
   // Flatten the document so paragraph wraps don't break our patterns.
   const flat = text.replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ')
 
-  // Find every "Please follow the Dropbox link..." marker location.
+  // The phrase "Please follow the Dropbox link below for the completed abstracts on"
+  // appears TWICE per block in the real email PDF — once introducing the highlighted
+  // block (followed by County/Type/Lease and (Unit Name)), and a second time
+  // immediately before the restated URL line (followed by County/Type/Lease and a URL).
+  // We only want the FIRST occurrence — the highlighted block — because that's where
+  // the (Unit Name) lives and where the canonical PID list is.
   const markerRe = /Please follow the Dropbox link below for the completed abstracts on/gi
   const starts: number[] = []
   let m: RegExpExecArray | null
@@ -88,8 +97,8 @@ function parseEmailPdf(text: string): {
 
   for (let i = 0; i < starts.length; i++) {
     const segStart = starts[i]
-    // Cap the segment at the NEXT marker, OR at email-boundary markers
-    // (subject line of next email, "Thank You" signoff, "Note:" annotation).
+    // Cap the segment at the NEXT marker (which may be either the URL-restatement
+    // OR the next block's intro), AND at obvious email-boundary markers.
     const nextMarker = i + 1 < starts.length ? starts[i + 1] : flat.length
     const stopCandidates = [
       nextMarker,
@@ -111,17 +120,20 @@ function parseEmailPdf(text: string): {
     const type = headerMatch[2].trim()
     const lease = (headerMatch[3] ?? '').trim()
 
-    // Work in the slice AFTER the header so we don't pick up PIDs from a
-    // preceding subject line or signature.
+    // Work in the slice AFTER the header.
     const headerIdx = seg.indexOf(headerMatch[0])
     const afterHeader = seg.slice(headerIdx + headerMatch[0].length)
 
     // PIDs ONLY live between the header and the "(Unit Name)" parens
-    // (or the first dropbox URL, whichever comes first). This prevents
-    // counting PIDs from the RESTATED block / URL line.
+    // (or the first dropbox URL, or the start of the URL-restatement that
+    // follows — whichever comes first). This prevents counting PIDs from the
+    // RESTATED block / URL line where they'd be duplicated.
     const parenIdx = afterHeader.search(/\([^)]+\)/)
     const urlIdx = afterHeader.search(/https?:\/\//)
-    const stops = [parenIdx, urlIdx].filter(x => x >= 0)
+    // Also stop at any second occurrence of "Washington County" / "<X> County"
+    // within this segment, which would indicate the start of the URL-restated header.
+    const restateIdx = afterHeader.search(/[A-Z][a-zA-Z]+\s+County\s*[-–]/)
+    const stops = [parenIdx, urlIdx, restateIdx].filter(x => x >= 0)
     const pidScanEnd = stops.length > 0 ? Math.min(...stops) : afterHeader.length
     const pidScanRegion = afterHeader.slice(0, pidScanEnd)
 
