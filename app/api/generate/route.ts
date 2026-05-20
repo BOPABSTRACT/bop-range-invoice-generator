@@ -78,25 +78,59 @@ function parseEmailPdf(text: string): {
   // Flatten the document so paragraph wraps don't break our patterns.
   const flat = text.replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ')
 
-  // Split into segments at "Please follow the Dropbox link" boundaries.
-  // The first segment (before any "Please follow") is the email header — discard it.
-  const segments = flat.split(/Please follow the Dropbox link below for the completed abstracts on/i)
-  for (let i = 1; i < segments.length; i++) {
-    const seg = segments[i]
+  // Find every "Please follow the Dropbox link..." marker location.
+  const markerRe = /Please follow the Dropbox link below for the completed abstracts on/gi
+  const starts: number[] = []
+  let m: RegExpExecArray | null
+  while ((m = markerRe.exec(flat)) !== null) {
+    starts.push(m.index + m[0].length)
+  }
 
-    const headerMatch = seg.match(
-      /([A-Z][a-zA-Z]+)\s+County\s*[-–]\s*([^-–]+?)\s*[-–]\s*(?:Lease\s+([A-Za-z0-9\-]+)|Unleased)\b/
-    )
+  for (let i = 0; i < starts.length; i++) {
+    const segStart = starts[i]
+    // Cap the segment at the NEXT marker, OR at email-boundary markers
+    // (subject line of next email, "Thank You" signoff, "Note:" annotation).
+    const nextMarker = i + 1 < starts.length ? starts[i + 1] : flat.length
+    const stopCandidates = [
+      nextMarker,
+      flat.indexOf('From:', segStart),
+      flat.indexOf('Subject:', segStart),
+      flat.indexOf('Note:', segStart),
+      flat.toLowerCase().indexOf('thank you,', segStart),
+    ].filter(x => x > segStart)
+    const segEnd = stopCandidates.length > 0 ? Math.min(...stopCandidates) : flat.length
+
+    const seg = flat.slice(segStart, segEnd)
+
+    // Header: "[County] County - [Work Type] - (Lease [Lease#] | Unleased) - ..."
+    const headerRe = /([A-Z][a-zA-Z]+)\s+County\s*[-–]\s*([^-–]+?)\s*[-–]\s*(?:Lease\s+([A-Za-z0-9\-]+)|Unleased)\b/
+    const headerMatch = seg.match(headerRe)
     if (!headerMatch) continue
 
     const county = headerMatch[1].trim()
     const type = headerMatch[2].trim()
     const lease = (headerMatch[3] ?? '').trim()
 
-    // Unit = first non-empty parenthesized phrase anywhere in the segment.
-    // Skip parens that look like URL fragments.
+    // Work in the slice AFTER the header so we don't pick up PIDs from a
+    // preceding subject line or signature.
+    const headerIdx = seg.indexOf(headerMatch[0])
+    const afterHeader = seg.slice(headerIdx + headerMatch[0].length)
+
+    // PIDs ONLY live between the header and the "(Unit Name)" parens
+    // (or the first dropbox URL, whichever comes first). This prevents
+    // counting PIDs from the RESTATED block / URL line.
+    const parenIdx = afterHeader.search(/\([^)]+\)/)
+    const urlIdx = afterHeader.search(/https?:\/\//)
+    const stops = [parenIdx, urlIdx].filter(x => x >= 0)
+    const pidScanEnd = stops.length > 0 ? Math.min(...stops) : afterHeader.length
+    const pidScanRegion = afterHeader.slice(0, pidScanEnd)
+
+    // Dedupe in case the same PID appears more than once in the same paragraph.
+    const pids = Array.from(new Set(extractAllPids(pidScanRegion)))
+
+    // Unit = first non-empty parenthesized phrase, skipping URL-looking parens.
     let unit = ''
-    const parenMatches = seg.match(/\(([^)]+)\)/g)
+    const parenMatches = afterHeader.match(/\(([^)]+)\)/g)
     if (parenMatches) {
       for (const p of parenMatches) {
         const inner = p.slice(1, -1).trim()
@@ -106,8 +140,6 @@ function parseEmailPdf(text: string): {
         break
       }
     }
-
-    const pids = extractAllPids(seg)
 
     const entry: EmailEntry = { pids, unit, county, type, lease }
 
