@@ -45,33 +45,53 @@ function fmtCurrency(val: unknown): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
 }
 
+// Extracts every PID-looking token from a string (handles "p/o", commas, semicolons, "and", etc.)
+function extractAllPids(s: string): string[] {
+  if (!s) return []
+  const matches = s.match(/\d{3}-\d{3}-\d{2}-\d{2}-\d{4}-\d{2}/g)
+  return matches ? matches.map(cleanPid) : []
+}
+
+type EmailEntry = { pid: string; unit: string; county: string; type: string; lease: string }
+
 function parseEmailPdf(text: string): {
-  byLease: Map<string, { pid: string; unit: string; county: string; type: string }>
-  byPid: Map<string, { pid: string; unit: string; county: string; type: string; lease: string }>
+  byLease: Map<string, EmailEntry>
+  byPid: Map<string, EmailEntry>
 } {
-  const byLease = new Map<string, { pid: string; unit: string; county: string; type: string }>()
-  const byPid = new Map<string, { pid: string; unit: string; county: string; type: string; lease: string }>()
+  const byLease = new Map<string, EmailEntry>()
+  const byPid = new Map<string, EmailEntry>()
 
-  // Match the canonical block:
-  //   [County] County - [Work Type] - Lease [Lease#] - TPN [PID] ([Unit Name])
-  // AND the "Unleased" variant (no lease number):
-  //   [County] County - [Work Type] - Unleased - TPN [PID] ([Unit Name])
+  // Flatten line breaks so multi-line blocks parse as one string.
+  // (Email PDFs frequently wrap long TPN lists across multiple lines.)
+  const flat = text.replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ')
+
+  // Anchor on each "(Unit Name)" mention, then walk backward to find the
+  // county/work-type/lease/PID region that belongs to it. This is more
+  // resilient than one giant regex because the PID region is messy
+  // (commas, semicolons, "p/o", "and", line breaks, lease suffixes, etc.).
   //
-  // Work Type = anything between the 1st and 2nd dash after "County"
-  // Unit Name = anything inside the parentheses after the TPN
-  const blockRegex = /([A-Z][a-zA-Z]+)\s+County\s*[-–]\s*([^-–\n]+?)\s*[-–]\s*(?:Lease\s+(\d{6,})|Unleased)\s*[-–]\s*TPN\s*([\d\-]+)\s*\(([^)]+)\)/g
+  // Pattern (loosened):
+  //   [County] County - [Work Type] - (Lease [Lease#(+suffix)] | Unleased) - TPN [...PID region...] ([Unit])
+  const blockRegex = /([A-Z][a-zA-Z]+)\s+County\s*[-–]\s*([^-–\n]+?)\s*[-–]\s*(?:Lease\s+([A-Za-z0-9\-]+)|Unleased)\s*[-–]\s*TPN\s+([^()]+?)\s*\(([^)]+)\)/g
 
-  for (const match of text.matchAll(blockRegex)) {
+  for (const match of flat.matchAll(blockRegex)) {
     const county = match[1].trim()
     const type = match[2].trim()
     const lease = (match[3] ?? '').trim()
-    const pid = cleanPid(match[4])
+    const pidRegion = match[4]
     const unit = match[5].trim()
 
-    const entry = { pid, unit, county, type }
+    const pids = extractAllPids(pidRegion)
+    const primaryPid = pids[0] || ''
+
+    const entry: EmailEntry = { pid: primaryPid, unit, county, type, lease }
 
     if (lease) byLease.set(lease, entry)
-    if (pid) byPid.set(pid, { ...entry, lease })
+    // Index by EVERY PID in the block, so multi-parcel blocks can be found
+    // by any of their PIDs.
+    for (const p of pids) {
+      if (!byPid.has(p)) byPid.set(p, entry)
+    }
   }
 
   return { byLease, byPid }
@@ -82,6 +102,33 @@ function matchReceipt(invoiceNum: string, receiptFiles: { name: string; buffer: 
     if (r.name.includes(invoiceNum)) return r.buffer
   }
   return null
+}
+
+// Try every Excel-side identifier against the email maps and return the first hit.
+function lookupEmailInfo(
+  excelLease: string,
+  excelPidCell: string,
+  byLease: Map<string, EmailEntry>,
+  byPid: Map<string, EmailEntry>,
+): EmailEntry | undefined {
+  // 1) Try lease exactly as it appears in Excel
+  if (excelLease) {
+    const hit = byLease.get(excelLease.trim())
+    if (hit) return hit
+  }
+  // 2) Try lease with whitespace/case normalized
+  if (excelLease) {
+    const norm = excelLease.trim()
+    for (const [k, v] of byLease) {
+      if (k.toLowerCase() === norm.toLowerCase()) return v
+    }
+  }
+  // 3) Fallback: try EVERY PID in the Excel PID cell (handles "PID1_PID2", "PID1; PID2", etc.)
+  for (const p of extractAllPids(excelPidCell)) {
+    const hit = byPid.get(p)
+    if (hit) return hit
+  }
+  return undefined
 }
 
 async function buildInvoicePdf(
@@ -121,7 +168,8 @@ async function buildInvoicePdf(
     : []
 
   let leaseNo = ''
-  let pid = ''
+  let pidCell = '' // raw cell value from Excel (may contain multiple PIDs)
+  let pid = ''    // first PID for display purposes
   let unit = ''
   let county = 'Washington'
   let workType = 'Deed Search'
@@ -130,22 +178,16 @@ async function buildInvoicePdf(
     const r = row as unknown[]
     if (r[4] && String(r[4]).trim()) {
       leaseNo = String(r[4]).trim()
-      pid = cleanPid(String(r[3] ?? '').trim())
+      pidCell = cleanPid(String(r[3] ?? '').trim())
+      pid = extractAllPids(pidCell)[0] || pidCell
       break
     }
   }
 
   const { byLease, byPid } = parseEmailPdf(emailText)
-
-  // Primary: match by Lease No. Fallback: match by PID.
-  let emailInfo = byLease.get(leaseNo)
-  if (!emailInfo && pid) {
-    const byPidHit = byPid.get(pid)
-    if (byPidHit) emailInfo = byPidHit
-  }
+  const emailInfo = lookupEmailInfo(leaseNo, pidCell, byLease, byPid)
 
   if (emailInfo) {
-    if (emailInfo.pid && cleanPid(emailInfo.pid).length > pid.length) pid = cleanPid(emailInfo.pid)
     if (emailInfo.unit) unit = emailInfo.unit
     if (emailInfo.county) county = emailInfo.county
     if (emailInfo.type) workType = emailInfo.type
@@ -507,6 +549,9 @@ export async function POST(req: NextRequest) {
       receiptData.push({ name: r.name, buffer: Buffer.from(await r.arrayBuffer()) })
     }
 
+    // Parse email ONCE up front and reuse for every invoice in the batch.
+    const { byLease, byPid } = parseEmailPdf(emailText)
+
     const zip = new JSZip()
 
     for (const excelFile of excelFiles) {
@@ -522,24 +567,21 @@ export async function POST(req: NextRequest) {
         ? (XLSX.utils.sheet_to_json(detailWs, { header: 1, defval: '' }) as unknown[][]).slice(2)
         : []
 
-      let filenamePid = ''
+      let filenamePidCell = ''
       let filenameLeaseNo = ''
       for (const row of detailRows) {
         const r = row as unknown[]
         if (r[4] && String(r[4]).trim()) {
           filenameLeaseNo = String(r[4]).trim()
-          filenamePid = cleanPid(String(r[3] ?? '').trim())
+          filenamePidCell = cleanPid(String(r[3] ?? '').trim())
           break
         }
       }
 
-      const { byLease, byPid } = parseEmailPdf(emailText)
-      let emailInfo = byLease.get(filenameLeaseNo)
-      if (!emailInfo && filenamePid) {
-        emailInfo = byPid.get(filenamePid)
-      }
+      const emailInfo = lookupEmailInfo(filenameLeaseNo, filenamePidCell, byLease, byPid)
       const filenameUnit = emailInfo?.unit || ''
       const filenameType = emailInfo?.type || 'Deed Search'
+      const filenamePid = extractAllPids(filenamePidCell)[0] || filenamePidCell
 
       const nameParts = [
         `#${invoiceNum}`,
