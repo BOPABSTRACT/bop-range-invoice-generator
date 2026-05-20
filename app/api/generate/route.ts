@@ -45,39 +45,36 @@ function fmtCurrency(val: unknown): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
 }
 
-function parseEmailPdf(text: string): Map<string, { pid: string; unit: string; county: string; type: string }> {
-  const map = new Map<string, { pid: string; unit: string; county: string; type: string }>()
+function parseEmailPdf(text: string): {
+  byLease: Map<string, { pid: string; unit: string; county: string; type: string }>
+  byPid: Map<string, { pid: string; unit: string; county: string; type: string; lease: string }>
+} {
+  const byLease = new Map<string, { pid: string; unit: string; county: string; type: string }>()
+  const byPid = new Map<string, { pid: string; unit: string; county: string; type: string; lease: string }>()
 
-  const countyMatch = text.match(/([A-Z][a-z]+)\s+County/g)
-  const county = countyMatch ? countyMatch[0].replace(' County', '') : 'Washington'
+  // Match the canonical block:
+  //   [County] County - [Work Type] - Lease [Lease#] - TPN [PID] ([Unit Name])
+  // AND the "Unleased" variant (no lease number):
+  //   [County] County - [Work Type] - Unleased - TPN [PID] ([Unit Name])
+  //
+  // Work Type = anything between the 1st and 2nd dash after "County"
+  // Unit Name = anything inside the parentheses after the TPN
+  const blockRegex = /([A-Z][a-zA-Z]+)\s+County\s*[-–]\s*([^-–\n]+?)\s*[-–]\s*(?:Lease\s+(\d{6,})|Unleased)\s*[-–]\s*TPN\s*([\d\-]+)\s*\(([^)]+)\)/g
 
-  const unitMatch = text.match(/([A-Z][a-z]+ [A-Z][a-z]+ [A-Z]-[A-Z])/)
-  const unit = unitMatch ? unitMatch[1] : ''
+  for (const match of text.matchAll(blockRegex)) {
+    const county = match[1].trim()
+    const type = match[2].trim()
+    const lease = (match[3] ?? '').trim()
+    const pid = cleanPid(match[4])
+    const unit = match[5].trim()
 
-  const typeMatch = text.match(/Deed Search|Title Search|Title/i)
-  const type = typeMatch ? typeMatch[0] : 'Deed Search'
+    const entry = { pid, unit, county, type }
 
-  const leaseBlocks = text.matchAll(/(\d{10}[A-Z]?)\s*[-–]\s*TPN\s*([\d\-]+)/g)
-  for (const match of leaseBlocks) {
-    map.set(match[1], { pid: cleanPid(match[2]), unit, county, type })
+    if (lease) byLease.set(lease, entry)
+    if (pid) byPid.set(pid, { ...entry, lease })
   }
 
-  const altBlocks = text.matchAll(/(\d{10}[A-Z]?)[^\n]*?([\d]{3}-[\d]{3}-[\d]{2}-[\d]{2}-[\d]{4}-[\d]{2})/g)
-  for (const match of altBlocks) {
-    if (!map.has(match[1])) {
-      map.set(match[1], { pid: cleanPid(match[2]), unit, county, type })
-    }
-  }
-
-  if (map.size === 0) {
-    const leaseNums = [...text.matchAll(/\b(\d{10}[A-Z]?)\b/g)].map(m => m[1])
-    const pids = [...text.matchAll(/([\d]{3}-[\d]{3}-[\d]{2}-[\d]{2}-[\d]{4}-[\d]{2})/g)].map(m => m[1])
-    leaseNums.forEach((lease, i) => {
-      map.set(lease, { pid: cleanPid(pids[i] || ''), unit, county, type })
-    })
-  }
-
-  return map
+  return { byLease, byPid }
 }
 
 function matchReceipt(invoiceNum: string, receiptFiles: { name: string; buffer: Buffer }[]): Buffer | null {
@@ -119,8 +116,6 @@ async function buildInvoicePdf(
   const brokerDataRows = brokerRows.filter(r => String((r as unknown[])[0]).toLowerCase() !== 'totals')
   const brokerTotalsRow = brokerRows.find(r => String((r as unknown[])[0]).toLowerCase() === 'totals')
 
-  const emailMap = parseEmailPdf(emailText)
-
   const detailRows = detailSheet
     ? (XLSX.utils.sheet_to_json(detailSheet, { header: 1, defval: '' }) as unknown[][]).slice(2)
     : []
@@ -140,17 +135,20 @@ async function buildInvoicePdf(
     }
   }
 
-  const emailInfo = emailMap.get(leaseNo)
+  const { byLease, byPid } = parseEmailPdf(emailText)
+
+  // Primary: match by Lease No. Fallback: match by PID.
+  let emailInfo = byLease.get(leaseNo)
+  if (!emailInfo && pid) {
+    const byPidHit = byPid.get(pid)
+    if (byPidHit) emailInfo = byPidHit
+  }
+
   if (emailInfo) {
     if (emailInfo.pid && cleanPid(emailInfo.pid).length > pid.length) pid = cleanPid(emailInfo.pid)
     if (emailInfo.unit) unit = emailInfo.unit
     if (emailInfo.county) county = emailInfo.county
     if (emailInfo.type) workType = emailInfo.type
-  }
-
-  if (!unit) {
-    const unitMatch = emailText.match(/([A-Z][a-z]+ [A-Z][a-z]+ [A-Z]-[A-Z])/)
-    unit = unitMatch ? unitMatch[1] : ''
   }
 
   const black = [0, 0, 0] as [number, number, number]
@@ -535,8 +533,11 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      const emailMap = parseEmailPdf(emailText)
-      const emailInfo = emailMap.get(filenameLeaseNo)
+      const { byLease, byPid } = parseEmailPdf(emailText)
+      let emailInfo = byLease.get(filenameLeaseNo)
+      if (!emailInfo && filenamePid) {
+        emailInfo = byPid.get(filenamePid)
+      }
       const filenameUnit = emailInfo?.unit || ''
       const filenameType = emailInfo?.type || 'Deed Search'
 
