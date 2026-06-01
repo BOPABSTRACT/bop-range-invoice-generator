@@ -252,6 +252,13 @@ async function buildInvoicePdf(
     if (emailInfo.unit) unit = emailInfo.unit
     if (emailInfo.county) county = emailInfo.county
     if (emailInfo.type) workType = emailInfo.type
+    // Match filename convention: when the email block has multiple PIDs,
+    // show the FIRST email PID followed by " et al" in the invoice PID field.
+    if (emailInfo.pids && emailInfo.pids.length > 0) {
+      pid = emailInfo.pids.length > 1
+        ? `${emailInfo.pids[0]} et al`
+        : emailInfo.pids[0]
+    }
   }
 
   const black = [0, 0, 0] as [number, number, number]
