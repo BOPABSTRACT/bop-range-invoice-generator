@@ -140,7 +140,8 @@ function parseEmailPdf(text: string): {
     // Dedupe in case the same PID appears more than once in the same paragraph.
     const pids = Array.from(new Set(extractAllPids(pidScanRegion)))
 
-    // Unit = first non-empty parenthesized phrase, skipping URL-looking parens.
+    // Unit = first non-empty parenthesized phrase that looks like a person's name.
+    // Skip URLs, measurements ("5.025 acres"), and anything with digits.
     let unit = ''
     const parenMatches = afterHeader.match(/\(([^)]+)\)/g)
     if (parenMatches) {
@@ -148,6 +149,8 @@ function parseEmailPdf(text: string): {
         const inner = p.slice(1, -1).trim()
         if (!inner) continue
         if (/https?:|dropbox|\.com|\.pdf/i.test(inner)) continue
+        if (/\d/.test(inner)) continue                       // skip measurements/dates
+        if (/^(p\/o|et\.?\s*al)\b/i.test(inner)) continue    // skip p/o, et al qualifiers
         unit = fixBrokenName(inner)
         break
       }
@@ -177,12 +180,17 @@ function lookupEmailInfo(
   byLease: Map<string, EmailEntry>,
   byPid: Map<string, EmailEntry>,
 ): EmailEntry | undefined {
+  // Normalize: strip "Lease " prefix (Excel sometimes has it, the email map never does),
+  // collapse whitespace, and lowercase for case-insensitive comparison.
+  const normalize = (s: string) =>
+    s.trim().replace(/^lease\s+(no\.?\s*)?/i, '').trim().toLowerCase()
+
   if (excelLease) {
-    const hit = byLease.get(excelLease.trim())
-    if (hit) return hit
-    const norm = excelLease.trim().toLowerCase()
-    for (const [k, v] of byLease) {
-      if (k.toLowerCase() === norm) return v
+    const target = normalize(excelLease)
+    if (target) {
+      for (const [k, v] of byLease) {
+        if (normalize(k) === target) return v
+      }
     }
   }
   for (const p of extractAllPids(excelPidCell)) {
