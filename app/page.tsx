@@ -4,6 +4,16 @@ import { useState, useRef } from 'react'
 
 const LOGO = "https://i.imgur.com/szjzoxt.png"
 
+// Vercel serverless functions have a 4.5 MB request body limit.
+// We use 4.4 MB to leave a little headroom for form-data overhead.
+const MAX_UPLOAD_BYTES = 4_400_000
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+}
+
 export default function Home() {
   const [authenticated, setAuthenticated] = useState(false)
   const [passwordInput, setPasswordInput] = useState('')
@@ -17,6 +27,14 @@ export default function Home() {
   const excelRef = useRef<HTMLInputElement>(null)
   const receiptRef = useRef<HTMLInputElement>(null)
   const emailRef = useRef<HTMLInputElement>(null)
+
+  // Live-computed total upload size and over-limit flag.
+  const totalBytes =
+    excelFiles.reduce((sum, f) => sum + f.size, 0) +
+    receiptFiles.reduce((sum, f) => sum + f.size, 0) +
+    (emailFile?.size || 0)
+  const overLimit = totalBytes > MAX_UPLOAD_BYTES
+  const hasAnyFile = excelFiles.length > 0 || receiptFiles.length > 0 || emailFile !== null
 
   const handlePasswordSubmit = () => {
     if (passwordInput === 'BOP2026') {
@@ -40,6 +58,15 @@ export default function Home() {
     }
     if (!invoiceDate.trim()) {
       setMessage('Please enter an invoice date.')
+      setStatus('error')
+      return
+    }
+    if (overLimit) {
+      setMessage(
+        `Your files total ${formatBytes(totalBytes)} — too large to upload. ` +
+        `Combined size must be under ${formatBytes(MAX_UPLOAD_BYTES)}. ` +
+        `The receipts PDF is usually the heaviest — try compressing it at iLovePDF.com or SmallPDF.com.`
+      )
       setStatus('error')
       return
     }
@@ -207,19 +234,54 @@ export default function Home() {
         </Section>
 
         <Section number="5" title="Generate Invoices">
+          {hasAnyFile && (
+            <div style={{
+              marginBottom: 16,
+              padding: '12px 16px',
+              borderRadius: 6,
+              background: overLimit ? 'rgba(200,60,60,0.08)' : 'rgba(200,169,110,0.04)',
+              border: `1px solid ${overLimit ? '#8b2020' : '#2a2a3a'}`,
+              fontSize: 13,
+              color: overLimit ? '#e07070' : '#888',
+              lineHeight: 1.6,
+            }}>
+              {overLimit ? (
+                <>
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                    ⚠ Files too large: {formatBytes(totalBytes)} (max {formatBytes(MAX_UPLOAD_BYTES)})
+                  </div>
+                  <div style={{ color: '#aaa', fontSize: 13 }}>
+                    The receipts PDF is usually the heaviest. Compress it for free at{' '}
+                    <a href="https://www.ilovepdf.com/compress_pdf" target="_blank" rel="noopener noreferrer"
+                       style={{ color: '#c8a96e', textDecoration: 'underline' }}>iLovePDF</a>
+                    {' '}or{' '}
+                    <a href="https://smallpdf.com/compress-pdf" target="_blank" rel="noopener noreferrer"
+                       style={{ color: '#c8a96e', textDecoration: 'underline' }}>SmallPDF</a>,
+                    {' '}then re-upload it.
+                  </div>
+                </>
+              ) : (
+                <>
+                  Total upload size: <span style={{ color: '#c8a96e' }}>{formatBytes(totalBytes)}</span>
+                  {' '}of {formatBytes(MAX_UPLOAD_BYTES)}
+                </>
+              )}
+            </div>
+          )}
+
           <button
             onClick={handleGenerate}
-            disabled={status === 'loading'}
+            disabled={status === 'loading' || overLimit}
             style={{
               width: '100%', padding: '16px 32px',
-              background: status === 'loading' ? '#2a2a3a' : 'linear-gradient(135deg, #c8a96e, #8b6914)',
-              color: status === 'loading' ? '#666' : '#fff',
+              background: (status === 'loading' || overLimit) ? '#2a2a3a' : 'linear-gradient(135deg, #c8a96e, #8b6914)',
+              color: (status === 'loading' || overLimit) ? '#666' : '#fff',
               border: 'none', borderRadius: 6, fontSize: 16,
               fontFamily: "'Georgia', serif", letterSpacing: '0.04em',
-              cursor: status === 'loading' ? 'not-allowed' : 'pointer', transition: 'all 0.2s',
+              cursor: (status === 'loading' || overLimit) ? 'not-allowed' : 'pointer', transition: 'all 0.2s',
             }}
           >
-            {status === 'loading' ? '⏳ Generating...' : '⬇ Generate & Download ZIP'}
+            {status === 'loading' ? '⏳ Generating...' : overLimit ? '✕ Files too large to upload' : '⬇ Generate & Download ZIP'}
           </button>
 
           {message && (
