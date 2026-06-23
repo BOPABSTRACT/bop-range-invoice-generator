@@ -16,8 +16,12 @@ const BOP = {
   phone: '724-747-1594',
 }
 
+// ============================================================
+// HELPERS
+// ============================================================
+
 function formatDate(val: unknown): string {
-  if (!val) return new Date().toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
+  if (!val) return ''
   if (val instanceof Date) return val.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
   const d = new Date(String(val))
   if (!isNaN(d.getTime())) return d.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' })
@@ -33,139 +37,133 @@ function normalizeInvoiceDate(input: string): string {
 }
 
 function sanitize(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_\-. #]/g, '_').trim()
-}
-
-function cleanPid(val: string): string {
-  return val.replace(/^[-\s]+/, '').trim()
+  // Allow letters, numbers, spaces, dashes, dots, hashes, commas, underscores.
+  return name.replace(/[^a-zA-Z0-9_\-. #,]/g, '_').trim()
 }
 
 function fmtCurrency(val: unknown): string {
   const n = Number(val ?? 0)
+  if (isNaN(n)) return String(val ?? '')
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
 }
 
-// Extracts every PID-looking token from a string.
-// Also handles PIDs broken across line wraps (e.g. "460-016-00-00-0036- 05")
-// by first collapsing any whitespace inside potential PID sequences.
-function extractAllPids(s: string): string[] {
-  if (!s) return []
-  // Repair PIDs broken by line wraps: a hyphen followed by whitespace then digits.
-  const repaired = s.replace(/(\d-)\s+(\d)/g, '$1$2')
-  const matches = repaired.match(/\d{3}-\d{3}-\d{2}-\d{2}-\d{4}-\d{2}/g)
-  return matches ? matches.map(cleanPid) : []
+function fmtNumber(val: unknown, decimals = 2): string {
+  const n = Number(val ?? 0)
+  if (isNaN(n)) return String(val ?? '')
+  return n.toFixed(decimals)
 }
 
-// Fix names that got broken by PDF text extraction (e.g. "S tevenson" -> "Stevenson").
-function fixBrokenName(s: string): string {
-  return s
-    .replace(/\b([A-Z])\s+([a-z]{2,})/g, '$1$2')
-    .replace(/\s+/g, ' ')
-    .trim()
+function stripLeasePrefix(s: string): string {
+  return s.replace(/^lease\s+(no\.?\s*)?/i, '').trim()
 }
 
-type EmailEntry = {
-  pids: string[]
-  unit: string
+function isEmpty(v: unknown): boolean {
+  return v === '' || v === null || v === undefined
+}
+
+// Classify a column by its header to know how to format the values.
+type ColKind = 'text' | 'days' | 'miles' | 'currency' | 'date'
+
+function classifyHeader(header: string, isFirstCol = false): ColKind {
+  const h = String(header).toLowerCase().trim()
+  if (isFirstCol) return 'text'
+  if (/^date$/.test(h)) return 'date'
+  // Text indicators win first ("Miles Description" is text, not miles count)
+  if (/broker|project|landman|prospect|legal|focus|description|complete/.test(h)) return 'text'
+  // If the header mentions a rate/amount/total/etc., it's money even if "day" or "miles" is in the name
+  const looksLikeMoney = /per|rate|amt|amount|services|total|copies|fee|mileage|labor|expense/.test(h)
+  if (!looksLikeMoney) {
+    if (/\bdays?\b|#\s*days/.test(h)) return 'days'
+    if (/\bmiles\b/.test(h)) return 'miles'
+  }
+  return 'currency'
+}
+
+function fmtByKind(val: unknown, kind: ColKind): string {
+  if (isEmpty(val)) return ''
+  switch (kind) {
+    case 'text': return String(val).trim()
+    case 'days': return fmtNumber(val, 3)
+    case 'miles': return String(Math.round(Number(val) || 0))
+    case 'date': return formatDate(val)
+    case 'currency': return fmtCurrency(val)
+  }
+}
+
+// Render a row by classifying each cell according to its header.
+function renderRow(row: unknown[], headers: string[]): string[] {
+  return headers.map((h, i) => {
+    const val = row[i]
+    if (isEmpty(val)) return ''
+    return fmtByKind(val, classifyHeader(h, i === 0))
+  })
+}
+
+// ============================================================
+// BILLING DATA LOOKUP
+// ============================================================
+
+type BillingEntry = {
   county: string
   type: string
   lease: string
+  parcel: string
+  unit: string
 }
 
-function parseEmailPdf(text: string): {
-  byLease: Map<string, EmailEntry>
-  byPid: Map<string, EmailEntry>
-} {
-  const byLease = new Map<string, EmailEntry>()
-  const byPid = new Map<string, EmailEntry>()
+function parseBillingXlsx(buffer: Buffer): Map<string, BillingEntry> {
+  const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true })
+  const sheetName = wb.SheetNames.find(n => n.toLowerCase() === 'parsed') || wb.SheetNames[0]
+  const sheet = wb.Sheets[sheetName]
+  if (!sheet) return new Map()
 
-  // Flatten the document so paragraph wraps don't break our patterns.
-  const flat = text.replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ')
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' }) as unknown[][]
 
-  // The phrase "Please follow the Dropbox link below for the completed abstracts on"
-  // appears TWICE per block in the real email PDF — once introducing the highlighted
-  // block (followed by County/Type/Lease and (Unit Name)), and a second time
-  // immediately before the restated URL line (followed by County/Type/Lease and a URL).
-  // We only want the FIRST occurrence — the highlighted block — because that's where
-  // the (Unit Name) lives and where the canonical PID list is.
-  const markerRe = /Please follow the Dropbox link below for the completed abstracts on/gi
-  const starts: number[] = []
-  let m: RegExpExecArray | null
-  while ((m = markerRe.exec(flat)) !== null) {
-    starts.push(m.index + m[0].length)
-  }
-
-  for (let i = 0; i < starts.length; i++) {
-    const segStart = starts[i]
-    // Cap the segment at the NEXT marker (which may be either the URL-restatement
-    // OR the next block's intro), AND at obvious email-boundary markers.
-    const nextMarker = i + 1 < starts.length ? starts[i + 1] : flat.length
-    const stopCandidates = [
-      nextMarker,
-      flat.indexOf('From:', segStart),
-      flat.indexOf('Subject:', segStart),
-      flat.indexOf('Note:', segStart),
-      flat.toLowerCase().indexOf('thank you,', segStart),
-    ].filter(x => x > segStart)
-    const segEnd = stopCandidates.length > 0 ? Math.min(...stopCandidates) : flat.length
-
-    const seg = flat.slice(segStart, segEnd)
-
-    // Header: "[County] County - [Work Type] - (Lease [Lease#] | Unleased) - ..."
-    const headerRe = /([A-Z][a-zA-Z]+)\s+County\s*[-–]\s*([^-–]+?)\s*[-–]\s*(?:Lease\s+([A-Za-z0-9\-]+)|Unleased)\b/
-    const headerMatch = seg.match(headerRe)
-    if (!headerMatch) continue
-
-    const county = headerMatch[1].trim()
-    const type = headerMatch[2].trim()
-    const lease = (headerMatch[3] ?? '').trim()
-
-    // Work in the slice AFTER the header.
-    const headerIdx = seg.indexOf(headerMatch[0])
-    const afterHeader = seg.slice(headerIdx + headerMatch[0].length)
-
-    // PIDs ONLY live between the header and the "(Unit Name)" parens
-    // (or the first dropbox URL, or the start of the URL-restatement that
-    // follows — whichever comes first). This prevents counting PIDs from the
-    // RESTATED block / URL line where they'd be duplicated.
-    const parenIdx = afterHeader.search(/\([^)]+\)/)
-    const urlIdx = afterHeader.search(/https?:\/\//)
-    // Also stop at any second occurrence of "Washington County" / "<X> County"
-    // within this segment, which would indicate the start of the URL-restated header.
-    const restateIdx = afterHeader.search(/[A-Z][a-zA-Z]+\s+County\s*[-–]/)
-    const stops = [parenIdx, urlIdx, restateIdx].filter(x => x >= 0)
-    const pidScanEnd = stops.length > 0 ? Math.min(...stops) : afterHeader.length
-    const pidScanRegion = afterHeader.slice(0, pidScanEnd)
-
-    // Dedupe in case the same PID appears more than once in the same paragraph.
-    const pids = Array.from(new Set(extractAllPids(pidScanRegion)))
-
-    // Unit = first non-empty parenthesized phrase that looks like a person's name.
-    // Skip URLs, measurements ("5.025 acres"), and anything with digits.
-    let unit = ''
-    const parenMatches = afterHeader.match(/\(([^)]+)\)/g)
-    if (parenMatches) {
-      for (const p of parenMatches) {
-        const inner = p.slice(1, -1).trim()
-        if (!inner) continue
-        if (/https?:|dropbox|\.com|\.pdf/i.test(inner)) continue
-        if (/\d/.test(inner)) continue                       // skip measurements/dates
-        if (/^(p\/o|et\.?\s*al)\b/i.test(inner)) continue    // skip p/o, et al qualifiers
-        unit = fixBrokenName(inner)
-        break
-      }
-    }
-
-    const entry: EmailEntry = { pids, unit, county, type, lease }
-
-    if (lease) byLease.set(lease, entry)
-    for (const p of pids) {
-      if (!byPid.has(p)) byPid.set(p, entry)
+  // Find header row.
+  let headerIdx = -1
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i] as unknown[]
+    if (row.some(c => /invoice\s*(number|#|num)/i.test(String(c ?? '')))) {
+      headerIdx = i
+      break
     }
   }
+  if (headerIdx < 0) return new Map()
+  const headers = (rows[headerIdx] as unknown[]).map(h => String(h ?? '').toLowerCase().trim())
 
-  return { byLease, byPid }
+  const col = (...keywords: string[]): number => {
+    for (const kw of keywords) {
+      const i = headers.findIndex(h => h.includes(kw))
+      if (i >= 0) return i
+    }
+    return -1
+  }
+  const invCol = col('invoice')
+  const cntCol = col('county')
+  const typeCol = col('type')
+  const leaseCol = col('lease')
+  const parcelCol = col('parcel', 'tpn', 'pid')
+  const unitCol = col('unit')
+
+  const map = new Map<string, BillingEntry>()
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const r = rows[i] as unknown[]
+    const inv = String(r[invCol] ?? '').trim()
+    if (!inv) continue
+    map.set(inv, {
+      county: cntCol >= 0 ? String(r[cntCol] ?? '').trim() : '',
+      type: typeCol >= 0 ? String(r[typeCol] ?? '').trim() : '',
+      lease: leaseCol >= 0 ? stripLeasePrefix(String(r[leaseCol] ?? '').trim()) : '',
+      parcel: parcelCol >= 0 ? String(r[parcelCol] ?? '').trim() : '',
+      unit: unitCol >= 0 ? String(r[unitCol] ?? '').trim() : '',
+    })
+  }
+  return map
 }
+
+// ============================================================
+// RECEIPT MATCHING
+// ============================================================
 
 function matchReceipt(invoiceNum: string, receiptFiles: { name: string; buffer: Buffer }[]): Buffer | null {
   for (const r of receiptFiles) {
@@ -174,36 +172,14 @@ function matchReceipt(invoiceNum: string, receiptFiles: { name: string; buffer: 
   return null
 }
 
-function lookupEmailInfo(
-  excelLease: string,
-  excelPidCell: string,
-  byLease: Map<string, EmailEntry>,
-  byPid: Map<string, EmailEntry>,
-): EmailEntry | undefined {
-  // Normalize: strip "Lease " prefix (Excel sometimes has it, the email map never does),
-  // collapse whitespace, and lowercase for case-insensitive comparison.
-  const normalize = (s: string) =>
-    s.trim().replace(/^lease\s+(no\.?\s*)?/i, '').trim().toLowerCase()
-
-  if (excelLease) {
-    const target = normalize(excelLease)
-    if (target) {
-      for (const [k, v] of byLease) {
-        if (normalize(k) === target) return v
-      }
-    }
-  }
-  for (const p of extractAllPids(excelPidCell)) {
-    const hit = byPid.get(p)
-    if (hit) return hit
-  }
-  return undefined
-}
+// ============================================================
+// PDF GENERATION
+// ============================================================
 
 async function buildInvoicePdf(
   excelBuffer: Buffer,
-  emailText: string,
-  matchedReceiptBuffer: Buffer | null,
+  billing: BillingEntry | undefined,
+  receiptBuffer: Buffer | null,
   invoiceDateOverride: string,
 ): Promise<Buffer> {
   const { jsPDF } = await import('jspdf')
@@ -212,63 +188,90 @@ async function buildInvoicePdf(
   const workbook = XLSX.read(excelBuffer, { type: 'buffer', cellDates: true })
   const summarySheet = workbook.Sheets['Summary']
   const detailSheet = workbook.Sheets['Work Detail']
-
   if (!summarySheet) throw new Error('No Summary sheet found')
 
   const summaryRows = XLSX.utils.sheet_to_json(summarySheet, { header: 1, defval: '' }) as unknown[][]
-  const invoiceNum = String((summaryRows[7] as unknown[])?.[5] ?? '')
+  const invoiceNum = String((summaryRows[7] as unknown[])?.[5] ?? '').trim()
   const invoiceDate = invoiceDateOverride || String((summaryRows[7] as unknown[])?.[1] ?? '')
   const period = String((summaryRows[15] as unknown[])?.[1] ?? '')
 
-  const headerRow = summaryRows[17] as string[]
-  const hasCopiesCol = headerRow && headerRow.some(h => String(h).toLowerCase().includes('cop'))
+  // From billing data, with sensible defaults.
+  const lease = billing?.lease ? billing.lease : ''
+  const parcel = billing?.parcel ? billing.parcel : ''
+  const county = billing?.county || 'Washington'
+  const unit = billing?.unit || ''
+  const workType = billing?.type || 'Deed Search'
 
-  const brokerRows: unknown[][] = []
-  for (let i = 18; i < summaryRows.length; i++) {
+  // ----------------------------------------------------------
+  // Find the broker-section header row (defaults to row 17).
+  // ----------------------------------------------------------
+  let brokerHeaderIdx = 17
+  for (let i = 15; i < Math.min(summaryRows.length, 22); i++) {
+    const r = summaryRows[i] as unknown[]
+    if (r && /^broker$/i.test(String(r[0] ?? '').trim())) { brokerHeaderIdx = i; break }
+  }
+  const brokerHeadersRaw = ((summaryRows[brokerHeaderIdx] as unknown[]) || []).map(h => String(h ?? '').trim())
+  while (brokerHeadersRaw.length > 0 && !brokerHeadersRaw[brokerHeadersRaw.length - 1]) brokerHeadersRaw.pop()
+  const numCols = brokerHeadersRaw.length || 6
+
+  // Identify the TOTAL column (case-insensitive match for "TOTAL").
+  let totalColIdx = brokerHeadersRaw.findIndex(h => /^total$/i.test(h))
+  if (totalColIdx < 0) totalColIdx = numCols - 1
+
+  // Collect broker rows.
+  const allBrokerRows: unknown[][] = []
+  for (let i = brokerHeaderIdx + 1; i < summaryRows.length; i++) {
     const row = summaryRows[i] as unknown[]
-    if (row && row[0] && String(row[0]).trim()) brokerRows.push(row)
+    if (row && row[0] && String(row[0]).trim()) allBrokerRows.push(row)
   }
+  const dataRows = allBrokerRows.filter(r => String((r as unknown[])[0]).toLowerCase() !== 'totals')
+  const totalsRow = allBrokerRows.find(r => String((r as unknown[])[0]).toLowerCase() === 'totals')
 
-  const brokerDataRows = brokerRows.filter(r => String((r as unknown[])[0]).toLowerCase() !== 'totals')
-  const brokerTotalsRow = brokerRows.find(r => String((r as unknown[])[0]).toLowerCase() === 'totals')
+  // Add a "Project" column appended after TOTAL.
+  const projectLabel = lease ? `Lease No. ${lease}` : ''
+  const brokerHeaders = [...brokerHeadersRaw, 'Project']
+  const projectColIdx = brokerHeaders.length - 1
 
-  const detailRows = detailSheet
-    ? (XLSX.utils.sheet_to_json(detailSheet, { header: 1, defval: '' }) as unknown[][]).slice(2)
-    : []
+  const brokerBody: string[][] = dataRows.map(r => {
+    const rendered = renderRow(r as unknown[], brokerHeadersRaw)
+    // Pad to numCols (in case the data row is shorter)
+    while (rendered.length < numCols) rendered.push('')
+    return [...rendered, projectLabel]
+  })
+  if (totalsRow) {
+    const rendered = renderRow(totalsRow as unknown[], brokerHeadersRaw)
+    while (rendered.length < numCols) rendered.push('')
+    rendered[0] = 'Totals'
+    brokerBody.push([...rendered, ''])
+  }
+  const brokerTotalsRowIndex = totalsRow ? brokerBody.length - 1 : -1
 
-  let leaseNo = ''
-  let pidCell = ''
-  let pid = ''
-  let unit = ''
-  let county = 'Washington'
-  let workType = 'Deed Search'
-
-  for (const row of detailRows) {
-    const r = row as unknown[]
-    if (r[4] && String(r[4]).trim()) {
-      leaseNo = String(r[4]).trim()
-      pidCell = cleanPid(String(r[3] ?? '').trim())
-      pid = extractAllPids(pidCell)[0] || pidCell
-      break
+  // ----------------------------------------------------------
+  // Work Detail dynamic parsing
+  // ----------------------------------------------------------
+  let detailHeaders: string[] = []
+  let detailData: unknown[][] = []
+  let detailTotalColIdx = -1
+  if (detailSheet) {
+    const detRows = XLSX.utils.sheet_to_json(detailSheet, { header: 1, defval: '' }) as unknown[][]
+    // Header row is typically row index 1.
+    let detHeaderIdx = 1
+    for (let i = 0; i < Math.min(detRows.length, 5); i++) {
+      const r = detRows[i] as unknown[]
+      if (r && /^landman$/i.test(String(r[0] ?? '').trim())) { detHeaderIdx = i; break }
     }
+    detailHeaders = ((detRows[detHeaderIdx] as unknown[]) || []).map(h => String(h ?? '').trim())
+    while (detailHeaders.length > 0 && !detailHeaders[detailHeaders.length - 1]) detailHeaders.pop()
+    detailTotalColIdx = detailHeaders.findIndex(h => /^total$/i.test(h))
+    detailData = detRows.slice(detHeaderIdx + 1).filter(r => {
+      const row = r as unknown[]
+      return row && row[0] && String(row[0]).trim() !== ''
+    })
   }
 
-  const { byLease, byPid } = parseEmailPdf(emailText)
-  const emailInfo = lookupEmailInfo(leaseNo, pidCell, byLease, byPid)
-
-  if (emailInfo) {
-    if (emailInfo.unit) unit = emailInfo.unit
-    if (emailInfo.county) county = emailInfo.county
-    if (emailInfo.type) workType = emailInfo.type
-    // Match filename convention: when the email block has multiple PIDs,
-    // show the FIRST email PID followed by " et al" in the invoice PID field.
-    if (emailInfo.pids && emailInfo.pids.length > 0) {
-      pid = emailInfo.pids.length > 1
-        ? `${emailInfo.pids[0]} et al`
-        : emailInfo.pids[0]
-    }
-  }
-
+  // ----------------------------------------------------------
+  // Colors and constants
+  // ----------------------------------------------------------
   const black = [0, 0, 0] as [number, number, number]
   const red = [255, 0, 0] as [number, number, number]
   const headerBg = [242, 220, 219] as [number, number, number]
@@ -306,15 +309,14 @@ async function buildInvoicePdf(
   let ly = 128
   let ry = 128
 
-  function leftLabel(label: string, value: string) {
+  const leftLabel = (label: string, value: string) => {
     doc.setFont('helvetica', 'bold'); doc.setTextColor(...lightGray)
     doc.text(label, lx, ly)
     doc.setFont('helvetica', 'normal'); doc.setTextColor(...black)
     doc.text(value, lx + 45, ly)
     ly += 13
   }
-
-  function rightLabel(label: string, value: string) {
+  const rightLabel = (label: string, value: string) => {
     doc.setFont('helvetica', 'bold'); doc.setTextColor(...lightGray)
     doc.text(label, rx, ry)
     doc.setFont('helvetica', 'normal'); doc.setTextColor(...black)
@@ -335,8 +337,8 @@ async function buildInvoicePdf(
   doc.text(BILL_TO.address, lx + 45, ly); ly += 13
   doc.text(BILL_TO.city, lx + 45, ly); ly += 13
 
-  rightLabel('Lease No.:', leaseNo)
-  rightLabel('PID:', pid)
+  rightLabel('Lease No.:', lease)
+  rightLabel('PID:', parcel)
   rightLabel('County:', county)
   rightLabel('Unit:', unit)
   rightLabel('Type:', workType)
@@ -354,53 +356,38 @@ async function buildInvoicePdf(
 
   const tableStartY = Math.max(ly + 20, ry + 20)
 
-  let tableHead: string[][]
-  let tableBody: string[][]
-  const totalCol = hasCopiesCol ? 5 : 4
+  // ----------------------------------------------------------
+  // Dynamic broker-summary column widths
+  // ----------------------------------------------------------
+  const pageContentWidth = 532 // 612 - 80 margins
+  const fixedBrokerW = 75
+  const fixedProjectW = 100
+  const totalColW = 62 // give TOTAL a touch more
+  const middleCount = brokerHeaders.length - 2 // exclude Broker + Project
+  const middleAvail = pageContentWidth - fixedBrokerW - fixedProjectW - totalColW
+  const middleColW = Math.max(40, Math.floor(middleAvail / Math.max(1, middleCount - 1)))
 
-  if (hasCopiesCol) {
-    tableHead = [['Broker', '# Days', 'Amt. Per Day', 'Total Prof. Services', 'Copies', 'TOTAL', 'Project']]
-    tableBody = brokerDataRows.map(r => {
-      const row = r as unknown[]
-      return [
-        String(row[0] ?? ''),
-        Number(row[1] ?? 0).toFixed(3),
-        fmtCurrency(row[2]),
-        fmtCurrency(row[3]),
-        fmtCurrency(row[4]),
-        fmtCurrency(row[5]),
-        `Lease No. ${leaseNo}`,
-      ]
-    })
-    if (brokerTotalsRow) {
-      const t = brokerTotalsRow as unknown[]
-      tableBody.push(['Totals', Number(t[1] ?? 0).toFixed(3), '', fmtCurrency(t[3]), fmtCurrency(t[4]), fmtCurrency(t[5]), ''])
+  const brokerColStyles: Record<number, { cellWidth: number; halign?: 'left' | 'center' | 'right'; overflow?: 'linebreak' }> = {}
+  brokerHeaders.forEach((h, i) => {
+    if (i === 0) {
+      brokerColStyles[i] = { cellWidth: fixedBrokerW, halign: 'left' }
+    } else if (i === projectColIdx) {
+      brokerColStyles[i] = { cellWidth: fixedProjectW, overflow: 'linebreak' }
+    } else if (i === totalColIdx) {
+      brokerColStyles[i] = { cellWidth: totalColW, halign: 'right' }
+    } else {
+      const kind = classifyHeader(h, false)
+      brokerColStyles[i] = {
+        cellWidth: middleColW,
+        halign: kind === 'days' || kind === 'miles' ? 'center' : 'right',
+      }
     }
-  } else {
-    tableHead = [['Broker', '# Days', 'Amt. Per Day', 'Total Prof. Services', 'TOTAL', 'Project']]
-    tableBody = brokerDataRows.map(r => {
-      const row = r as unknown[]
-      return [
-        String(row[0] ?? ''),
-        Number(row[1] ?? 0).toFixed(3),
-        fmtCurrency(row[2]),
-        fmtCurrency(row[3]),
-        fmtCurrency(row[4]),
-        `Lease No. ${leaseNo}`,
-      ]
-    })
-    if (brokerTotalsRow) {
-      const t = brokerTotalsRow as unknown[]
-      tableBody.push(['Totals', Number(t[1] ?? 0).toFixed(3), '', fmtCurrency(t[3]), fmtCurrency(t[4]), ''])
-    }
-  }
-
-  const totalsRowIndex = tableBody.length - 1
+  })
 
   autoTable(doc, {
     startY: tableStartY,
-    head: tableHead,
-    body: tableBody,
+    head: [brokerHeaders],
+    body: brokerBody,
     theme: 'grid',
     styles: {
       font: 'helvetica', fontSize: 8, textColor: black,
@@ -408,19 +395,11 @@ async function buildInvoicePdf(
       overflow: 'linebreak',
     },
     headStyles: { textColor: black, fillColor: headerBg, fontStyle: 'bold', halign: 'center' },
-    columnStyles: {
-      0: { cellWidth: 75 },
-      1: { halign: 'center', cellWidth: 42 },
-      2: { halign: 'right', cellWidth: 62 },
-      3: { halign: 'right', cellWidth: 82 },
-      4: { halign: 'right', cellWidth: 62 },
-      5: { halign: 'right', cellWidth: 62 },
-      6: { cellWidth: 105, overflow: 'linebreak' },
-    },
+    columnStyles: brokerColStyles,
     didParseCell: function(data) {
-      if (data.section === 'body' && data.row.index === totalsRowIndex) {
+      if (data.section === 'body' && data.row.index === brokerTotalsRowIndex) {
         data.cell.styles.fontStyle = 'bold'
-        if (data.column.index === totalCol) {
+        if (data.column.index === totalColIdx) {
           data.cell.styles.fillColor = totalsBg
         }
       }
@@ -435,155 +414,115 @@ async function buildInvoicePdf(
   doc.text('Please contact our accounting department with any questions regarding invoices', 306, finalY, { align: 'center' })
 
   // ============ PAGE 2: WORK DETAIL ============
-  doc.addPage()
-  doc.setFillColor(...white)
-  doc.rect(0, 0, 612, 792, 'F')
+  if (detailHeaders.length > 0 && detailData.length > 0) {
+    doc.addPage()
+    doc.setFillColor(...white)
+    doc.rect(0, 0, 612, 792, 'F')
 
-  doc.setFont('helvetica', 'bold')
-  doc.setFontSize(11)
-  doc.setTextColor(...black)
-  doc.text('Work Detail', 40, 45)
-  doc.setLineWidth(0.5)
-  doc.line(40, 52, 572, 52)
+    doc.setFont('helvetica', 'bold')
+    doc.setFontSize(11)
+    doc.setTextColor(...black)
+    doc.text('Work Detail', 40, 45)
+    doc.setLineWidth(0.5)
+    doc.line(40, 52, 572, 52)
 
-  const hasDetailCopies = detailSheet
-    ? (XLSX.utils.sheet_to_json(detailSheet, { header: 1, defval: '' }) as unknown[][])[1]?.some(
-        (h: unknown) => String(h).toLowerCase().includes('cop')
-      )
-    : false
+    // Compute totals row for the work detail by summing numeric columns.
+    // Skip per-unit rate columns: "Amt. Per Day", "Dayrate Amount", "Hourly Rate", etc.
+    // — these are rates, not amounts to be summed.
+    // DO sum calculated amounts even if header mentions "/mile" (e.g. "Mileage 0.7250/mile").
+    const isRateColumn = (h: string) =>
+      /\brate\b|dayrate|per\s+(day|diem|hour|hr|mile)|amt\.?\s*per|amount\s*per/i.test(h)
+    const totalsRowDetail: string[] = new Array(detailHeaders.length).fill('')
+    totalsRowDetail[0] = 'Totals'
+    detailHeaders.forEach((h, i) => {
+      if (i === 0) return
+      if (isRateColumn(h)) return
+      const kind = classifyHeader(h, false)
+      if (kind === 'currency' || kind === 'days' || kind === 'miles') {
+        let sum = 0
+        let any = false
+        for (const r of detailData) {
+          const v = (r as unknown[])[i]
+          const n = Number(v)
+          if (!isNaN(n) && v !== '' && v !== null && v !== undefined) {
+            sum += n
+            any = true
+          }
+        }
+        if (any) totalsRowDetail[i] = fmtByKind(sum, kind)
+      }
+    })
 
-  const detailDataRows = detailRows.filter(r => {
-    const row = r as unknown[]
-    return row[0] && String(row[0]).trim() !== ''
-  })
+    const detailBody: string[][] = detailData.map(r => renderRow(r as unknown[], detailHeaders))
+    detailBody.push(totalsRowDetail)
+    const detailTotalsIndex = detailBody.length - 1
 
-  let totalDays = 0
-  let totalLaborTotal = 0
-  let totalCopies = 0
-  let totalTotal = 0
-
-  detailDataRows.forEach(r => {
-    const row = r as unknown[]
-    if (hasDetailCopies) {
-      totalDays += Number(row[5] ?? 0)
-      totalLaborTotal += Number(row[7] ?? 0)
-      totalCopies += Number(row[8] ?? 0)
-      totalTotal += Number(row[9] ?? 0)
-    } else {
-      totalDays += Number(row[5] ?? 0)
-      totalLaborTotal += Number(row[7] ?? 0)
-      totalTotal += Number(row[8] ?? 0)
+    // Dynamic Work Detail widths.
+    // Use weight-based proportional layout, then scale to fit page.
+    const colWeight = (h: string): number => {
+      const lo = h.toLowerCase()
+      if (/description|complete/.test(lo) && !/miles\s+description/.test(lo)) return 14
+      if (/miles\s+description/.test(lo)) return 8
+      if (/landman|prospect/.test(lo)) return 7
+      if (/^date$/.test(lo)) return 6
+      if (/legal/.test(lo)) return 8
+      if (/focus|lease/.test(lo)) return 7
+      if (/\bdays\b/.test(lo)) return 4
+      if (/\bmiles\b/.test(lo) && !/mileage|description/.test(lo)) return 4
+      if (/copies/.test(lo)) return 6
+      if (/total\b/.test(lo)) return 6
+      if (/mileage|rate|amount|services|dayrate/.test(lo)) return 6
+      return 6
     }
-  })
-
-  let detailHead: string[][]
-  let detailBody: string[][]
-  const detailTotalCol = hasDetailCopies ? 8 : 7
-
-  if (hasDetailCopies) {
-    detailHead = [['Landman', 'Date', 'Prospect', 'Legal', 'Lease No.', 'Days', 'Labor\nTotal', 'Copies', 'Total', 'Description']]
-    detailBody = detailDataRows.map(r => {
-      const row = r as unknown[]
-      return [
-        String(row[0] ?? ''),
-        formatDate(row[1]),
-        String(row[2] ?? ''),
-        cleanPid(String(row[3] ?? '')),
-        String(row[4] ?? ''),
-        Number(row[5] ?? 0).toFixed(2),
-        fmtCurrency(row[7]),
-        fmtCurrency(row[8]),
-        fmtCurrency(row[9]),
-        String(row[10] ?? ''),
-      ]
+    const weights = detailHeaders.map(colWeight)
+    const totalWeight = weights.reduce((a, b) => a + b, 0) || 1
+    const detailColStyles: Record<number, { cellWidth: number; halign?: 'left' | 'center' | 'right'; overflow?: 'linebreak' }> = {}
+    detailHeaders.forEach((h, i) => {
+      const w = Math.max(28, Math.floor((weights[i] / totalWeight) * pageContentWidth))
+      const kind = classifyHeader(h, i === 0)
+      const isText = kind === 'text' || kind === 'date'
+      detailColStyles[i] = {
+        cellWidth: w,
+        halign: kind === 'currency' ? 'right' : kind === 'days' || kind === 'miles' ? 'center' : 'left',
+        ...(isText ? { overflow: 'linebreak' } : {}),
+      }
     })
-    detailBody.push(['Totals', '', '', '', '', totalDays.toFixed(2), fmtCurrency(totalLaborTotal), fmtCurrency(totalCopies), fmtCurrency(totalTotal), ''])
-  } else {
-    detailHead = [['Landman', 'Date', 'Prospect', 'Legal', 'Lease No.', 'Days', 'Labor\nTotal', 'Total', 'Description']]
-    detailBody = detailDataRows.map(r => {
-      const row = r as unknown[]
-      return [
-        String(row[0] ?? ''),
-        formatDate(row[1]),
-        String(row[2] ?? ''),
-        cleanPid(String(row[3] ?? '')),
-        String(row[4] ?? ''),
-        Number(row[5] ?? 0).toFixed(2),
-        fmtCurrency(row[7]),
-        fmtCurrency(row[8]),
-        String(row[9] ?? ''),
-      ]
+
+    autoTable(doc, {
+      startY: 60,
+      head: [detailHeaders],
+      body: detailBody,
+      theme: 'grid',
+      styles: {
+        font: 'helvetica', fontSize: 7, textColor: black,
+        fillColor: white, cellPadding: 3, lineColor: black, lineWidth: 0.3,
+        overflow: 'linebreak', valign: 'top',
+      },
+      headStyles: {
+        textColor: black, fillColor: headerBg, fontStyle: 'bold',
+        halign: 'center', overflow: 'linebreak', valign: 'middle',
+      },
+      columnStyles: detailColStyles,
+      didParseCell: function(data) {
+        if (data.section === 'body' && data.row.index === detailTotalsIndex) {
+          data.cell.styles.fontStyle = 'bold'
+          if (data.column.index === detailTotalColIdx) {
+            data.cell.styles.fillColor = totalsBg
+          }
+        }
+      },
+      margin: { left: 40, right: 40 },
     })
-    detailBody.push(['Totals', '', '', '', '', totalDays.toFixed(2), fmtCurrency(totalLaborTotal), fmtCurrency(totalTotal), ''])
   }
 
-  const detailTotalsIndex = detailBody.length - 1
-
-  autoTable(doc, {
-    startY: 60,
-    head: detailHead,
-    body: detailBody,
-    theme: 'grid',
-    styles: {
-      font: 'helvetica',
-      fontSize: 7,
-      textColor: black,
-      fillColor: white,
-      cellPadding: 3,
-      lineColor: black,
-      lineWidth: 0.3,
-      overflow: 'linebreak',
-      valign: 'top',
-    },
-    headStyles: {
-      textColor: black,
-      fillColor: headerBg,
-      fontStyle: 'bold',
-      halign: 'center',
-      overflow: 'linebreak',
-      valign: 'middle',
-    },
-    columnStyles: hasDetailCopies ? {
-      0: { cellWidth: 55, overflow: 'linebreak' },
-      1: { cellWidth: 45, overflow: 'linebreak' },
-      2: { cellWidth: 55, overflow: 'linebreak' },
-      3: { cellWidth: 65, overflow: 'linebreak' },
-      4: { cellWidth: 55, overflow: 'linebreak' },
-      5: { cellWidth: 28, halign: 'center' },
-      6: { cellWidth: 48, halign: 'right' },
-      7: { cellWidth: 48, halign: 'right' },
-      8: { cellWidth: 48, halign: 'right' },
-      9: { cellWidth: 85, overflow: 'linebreak' },
-    } : {
-      0: { cellWidth: 55, overflow: 'linebreak' },
-      1: { cellWidth: 45, overflow: 'linebreak' },
-      2: { cellWidth: 55, overflow: 'linebreak' },
-      3: { cellWidth: 65, overflow: 'linebreak' },
-      4: { cellWidth: 55, overflow: 'linebreak' },
-      5: { cellWidth: 28, halign: 'center' },
-      6: { cellWidth: 55, halign: 'right' },
-      7: { cellWidth: 55, halign: 'right' },
-      8: { cellWidth: 119, overflow: 'linebreak' },
-    },
-    didParseCell: function(data) {
-      if (data.section === 'body' && data.row.index === detailTotalsIndex) {
-        data.cell.styles.fontStyle = 'bold'
-        if (data.column.index === detailTotalCol) {
-          data.cell.styles.fillColor = totalsBg
-        }
-      }
-    },
-    margin: { left: 40, right: 40 },
-  })
-
-  // ============ APPEND RECEIPT (if matched) ============
+  // ============ APPEND RECEIPT ============
   try {
     const { PDFDocument } = await import('pdf-lib')
     const mainPdfBytes = doc.output('arraybuffer')
     const mainPdf = await PDFDocument.load(mainPdfBytes)
 
-    if (matchedReceiptBuffer) {
-      const receiptPdf = await PDFDocument.load(matchedReceiptBuffer)
+    if (receiptBuffer) {
+      const receiptPdf = await PDFDocument.load(receiptBuffer)
       const receiptPages = await mainPdf.copyPages(receiptPdf, receiptPdf.getPageIndices())
       receiptPages.forEach(p => mainPdf.addPage(p))
     }
@@ -595,34 +534,32 @@ async function buildInvoicePdf(
   }
 }
 
+// ============================================================
+// POST HANDLER
+// ============================================================
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData()
     const excelFiles = formData.getAll('excel') as File[]
     const receiptFiles = formData.getAll('receipts') as File[]
-    const emailFile = formData.get('email') as File
+    const billingFile = formData.get('billing') as File | null
     const rawDate = (formData.get('invoiceDate') as string) || ''
     const invoiceDateOverride = normalizeInvoiceDate(rawDate)
+    const outputFormat = ((formData.get('outputFormat') as string) || 'pdf').toLowerCase()
+    const wantsPdf = outputFormat === 'pdf' || outputFormat === 'both'
+    const wantsXlsx = outputFormat === 'excel' || outputFormat === 'both'
 
     if (!excelFiles.length) return NextResponse.json({ error: 'No Excel files uploaded' }, { status: 400 })
-    if (!emailFile) return NextResponse.json({ error: 'No email PDF uploaded' }, { status: 400 })
+    if (!billingFile) return NextResponse.json({ error: 'No billing data spreadsheet uploaded' }, { status: 400 })
 
-    const emailBuffer = Buffer.from(await emailFile.arrayBuffer())
-    let emailText = ''
-    try {
-      const pdfParse = (await import('pdf-parse')).default
-      const parsed = await pdfParse(emailBuffer)
-      emailText = parsed.text
-    } catch {
-      emailText = ''
-    }
+    const billingBuffer = Buffer.from(await billingFile.arrayBuffer())
+    const billingMap = parseBillingXlsx(billingBuffer)
 
     const receiptData: { name: string; buffer: Buffer }[] = []
     for (const r of receiptFiles) {
       receiptData.push({ name: r.name, buffer: Buffer.from(await r.arrayBuffer()) })
     }
-
-    const { byLease, byPid } = parseEmailPdf(emailText)
 
     const zip = new JSZip()
 
@@ -630,53 +567,44 @@ export async function POST(req: NextRequest) {
       const excelBuffer = Buffer.from(await excelFile.arrayBuffer())
       const wb = XLSX.read(excelBuffer, { type: 'buffer', cellDates: true })
       const ws = wb.Sheets['Summary']
-      const detailWs = wb.Sheets['Work Detail']
+      if (!ws) continue
       const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' }) as unknown[][]
       const invoiceNum = String((rows[7] as unknown[])?.[5] ?? '').trim() ||
         (excelFile.name.match(/(\d{5,})/)?.[1] ?? 'UNKNOWN')
 
-      const detailRows = detailWs
-        ? (XLSX.utils.sheet_to_json(detailWs, { header: 1, defval: '' }) as unknown[][]).slice(2)
-        : []
+      const billing = billingMap.get(invoiceNum)
 
-      let filenamePidCell = ''
-      let filenameLeaseNo = ''
-      for (const row of detailRows) {
-        const r = row as unknown[]
-        if (r[4] && String(r[4]).trim()) {
-          filenameLeaseNo = String(r[4]).trim()
-          filenamePidCell = cleanPid(String(r[3] ?? '').trim())
-          break
+      // Filename components.
+      const fnUnit = billing?.unit || 'Unknown'
+      const fnType = billing?.type || 'Deed Search'
+      let fnParcel = billing?.parcel || ''
+      if (!fnParcel) {
+        // Fallback: try to grab the first PID-looking thing from the Work Detail sheet.
+        const detailWs = wb.Sheets['Work Detail']
+        if (detailWs) {
+          const detRows = XLSX.utils.sheet_to_json(detailWs, { header: 1, defval: '' }) as unknown[][]
+          for (const r of detRows.slice(1)) {
+            const cell = String((r as unknown[])[3] ?? '').trim()
+            const m = cell.match(/\d{3}-\d{3}-\d{2}-\d{2}-\d{4}-\d{2}/)
+            if (m) { fnParcel = m[0]; break }
+          }
         }
+        if (!fnParcel) fnParcel = 'Unknown'
       }
 
-      const emailInfo = lookupEmailInfo(filenameLeaseNo, filenamePidCell, byLease, byPid)
-      const filenameUnit = emailInfo?.unit || ''
-      const filenameType = emailInfo?.type || 'Deed Search'
-
-      // Filename PID: take the FIRST pid from the email block (authoritative).
-      // Append " et al" ONLY if the email block lists more than one PID.
-      const emailPids = emailInfo?.pids || []
-      const excelPids = extractAllPids(filenamePidCell)
-      const firstPid = emailPids[0] || excelPids[0] || ''
-      const hasMultiple = emailPids.length > 1
-      const filenamePid = firstPid
-        ? (hasMultiple ? `${firstPid} et al` : firstPid)
-        : (filenamePidCell || 'Unknown')
-
-      const nameParts = [
-        `#${invoiceNum}`,
-        filenameUnit || 'Unknown',
-        filenamePid,
-        filenameType,
-      ]
-      const outputName = sanitize(nameParts.join(' - '))
+      const outputName = sanitize(`#${invoiceNum} - ${fnUnit} - ${fnParcel} - ${fnType}`)
 
       const matchedReceipt = matchReceipt(invoiceNum, receiptData)
 
       try {
-        const pdfBuffer = await buildInvoicePdf(excelBuffer, emailText, matchedReceipt, invoiceDateOverride)
-        zip.file(`${outputName}.pdf`, pdfBuffer)
+        if (wantsPdf) {
+          const pdfBuffer = await buildInvoicePdf(excelBuffer, billing, matchedReceipt, invoiceDateOverride)
+          zip.file(`${outputName}.pdf`, pdfBuffer)
+        }
+        if (wantsXlsx) {
+          // Pass-through the source Excel renamed.
+          zip.file(`${outputName}.xlsx`, excelBuffer)
+        }
       } catch (err) {
         return NextResponse.json({ error: `Failed for invoice ${invoiceNum}: ${String(err)}` }, { status: 500 })
       }
