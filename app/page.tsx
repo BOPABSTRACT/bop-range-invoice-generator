@@ -5,7 +5,7 @@ import { useState, useRef } from 'react'
 const LOGO = "https://i.imgur.com/szjzoxt.png"
 
 // Vercel serverless functions have a 4.5 MB request body limit.
-// We use 4.4 MB to leave a little headroom for form-data overhead.
+// 4.4 MB leaves headroom for form-data overhead.
 const MAX_UPLOAD_BYTES = 4_400_000
 
 function formatBytes(bytes: number): string {
@@ -14,27 +14,29 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
 }
 
+type OutputFormat = 'pdf' | 'excel' | 'both'
+
 export default function Home() {
   const [authenticated, setAuthenticated] = useState(false)
   const [passwordInput, setPasswordInput] = useState('')
   const [passwordError, setPasswordError] = useState(false)
   const [excelFiles, setExcelFiles] = useState<File[]>([])
   const [receiptFiles, setReceiptFiles] = useState<File[]>([])
-  const [emailFile, setEmailFile] = useState<File | null>(null)
+  const [billingFile, setBillingFile] = useState<File | null>(null)
   const [invoiceDate, setInvoiceDate] = useState('')
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>('pdf')
   const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
   const [message, setMessage] = useState('')
   const excelRef = useRef<HTMLInputElement>(null)
   const receiptRef = useRef<HTMLInputElement>(null)
-  const emailRef = useRef<HTMLInputElement>(null)
+  const billingRef = useRef<HTMLInputElement>(null)
 
-  // Live-computed total upload size and over-limit flag.
   const totalBytes =
     excelFiles.reduce((sum, f) => sum + f.size, 0) +
     receiptFiles.reduce((sum, f) => sum + f.size, 0) +
-    (emailFile?.size || 0)
+    (billingFile?.size || 0)
   const overLimit = totalBytes > MAX_UPLOAD_BYTES
-  const hasAnyFile = excelFiles.length > 0 || receiptFiles.length > 0 || emailFile !== null
+  const hasAnyFile = excelFiles.length > 0 || receiptFiles.length > 0 || billingFile !== null
 
   const handlePasswordSubmit = () => {
     if (passwordInput === 'BOP2026') {
@@ -47,12 +49,12 @@ export default function Home() {
 
   const handleGenerate = async () => {
     if (excelFiles.length === 0) {
-      setMessage('Please upload at least one Excel file.')
+      setMessage('Please upload at least one Excel invoice file.')
       setStatus('error')
       return
     }
-    if (!emailFile) {
-      setMessage('Please upload the billing email PDF.')
+    if (!billingFile) {
+      setMessage('Please upload the billing data spreadsheet.')
       setStatus('error')
       return
     }
@@ -76,8 +78,9 @@ export default function Home() {
     const formData = new FormData()
     excelFiles.forEach(f => formData.append('excel', f))
     receiptFiles.forEach(f => formData.append('receipts', f))
-    formData.append('email', emailFile)
+    formData.append('billing', billingFile)
     formData.append('invoiceDate', invoiceDate.trim())
+    formData.append('outputFormat', outputFormat)
 
     try {
       const res = await fetch('/api/generate', { method: 'POST', body: formData })
@@ -174,8 +177,8 @@ export default function Home() {
             Generate Invoices
           </h1>
           <p style={{ color: '#888', fontSize: 15, margin: 0, lineHeight: 1.6 }}>
-            Upload your Excel invoice files, any receipt PDFs, and the billing email PDF.
-            One complete PDF invoice will be generated per Excel file.
+            Upload your Excel invoice files, any receipt PDFs, and the billing data spreadsheet.
+            One complete invoice will be generated per Excel file.
           </p>
         </div>
 
@@ -204,15 +207,18 @@ export default function Home() {
           </div>
         </Section>
 
-        <Section number="3" title="Upload Billing Email PDF">
+        <Section number="3" title="Upload Billing Data Spreadsheet">
           <SingleUploadBox
-            label="Drop the billing email PDF here or click to browse"
-            accept=".pdf"
-            file={emailFile}
-            onChange={e => setEmailFile(e.target.files?.[0] || null)}
-            inputRef={emailRef}
-            icon="📧"
+            label="Drop the billing data .xlsx here or click to browse"
+            accept=".xlsx,.xls"
+            file={billingFile}
+            onChange={e => setBillingFile(e.target.files?.[0] || null)}
+            inputRef={billingRef}
+            icon="📑"
           />
+          <div style={{ fontSize: 12, color: '#666', marginTop: 8 }}>
+            Must contain columns: Invoice Number, County, Type, Lease Number, Parcel, Unit.
+          </div>
         </Section>
 
         <Section number="4" title="Invoice Date">
@@ -233,7 +239,30 @@ export default function Home() {
           />
         </Section>
 
-        <Section number="5" title="Generate Invoices">
+        <Section number="5" title="Output Format">
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            <FormatOption
+              label="PDF only"
+              sub="Rendered invoice"
+              selected={outputFormat === 'pdf'}
+              onClick={() => setOutputFormat('pdf')}
+            />
+            <FormatOption
+              label="Excel only"
+              sub="Source spreadsheet"
+              selected={outputFormat === 'excel'}
+              onClick={() => setOutputFormat('excel')}
+            />
+            <FormatOption
+              label="Both"
+              sub="PDF + Excel"
+              selected={outputFormat === 'both'}
+              onClick={() => setOutputFormat('both')}
+            />
+          </div>
+        </Section>
+
+        <Section number="6" title="Generate Invoices">
           {hasAnyFile && (
             <div style={{
               marginBottom: 16,
@@ -299,10 +328,10 @@ export default function Home() {
             How It Works
           </div>
           <div style={{ fontSize: 13, color: '#888', lineHeight: 1.8 }}>
-            Each Excel file becomes one invoice PDF with up to 3 pages:<br />
-            <span style={{ color: '#c8a96e' }}>Page 1</span> — Invoice summary (from Excel Summary sheet)<br />
-            <span style={{ color: '#c8a96e' }}>Page 2</span> — Work detail log (from Excel Work Detail sheet)<br />
-            <span style={{ color: '#c8a96e' }}>Page 3+</span> — Receipt appended if matched by invoice number
+            Each Excel invoice file is matched to the billing data spreadsheet by invoice number.<br />
+            <span style={{ color: '#c8a96e' }}>PDF</span> output: rendered invoice (summary + work detail) with the receipt appended if matched.<br />
+            <span style={{ color: '#c8a96e' }}>Excel</span> output: your source spreadsheet renamed to the standard naming convention.<br />
+            <span style={{ color: '#c8a96e' }}>Filename:</span> <span style={{ fontFamily: 'monospace', fontSize: 12 }}>#Invoice - Unit - Parcel - Type</span>
           </div>
         </div>
       </div>
@@ -327,6 +356,32 @@ function Section({ number, title, children }: { number: string; title: string; c
   )
 }
 
+function FormatOption({ label, sub, selected, onClick }: {
+  label: string; sub: string; selected: boolean; onClick: () => void
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        flex: '1 1 0',
+        minWidth: 160,
+        padding: '14px 20px',
+        background: selected ? 'rgba(200,169,110,0.08)' : '#0d0f14',
+        border: `2px solid ${selected ? '#c8a96e' : '#2a2a3a'}`,
+        borderRadius: 8,
+        color: selected ? '#c8a96e' : '#888',
+        fontFamily: "'Georgia', serif",
+        cursor: 'pointer',
+        textAlign: 'left',
+        transition: 'all 0.15s',
+      }}
+    >
+      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 12, color: selected ? '#a08a5a' : '#555' }}>{sub}</div>
+    </button>
+  )
+}
+
 function SingleUploadBox({ label, accept, file, onChange, inputRef, icon }: {
   label: string
   accept: string
@@ -346,7 +401,7 @@ function SingleUploadBox({ label, accept, file, onChange, inputRef, icon }: {
         <>
           <div style={{ fontSize: 28, marginBottom: 8 }}>{icon}</div>
           <div style={{ color: '#888', fontSize: 14 }}>{label}</div>
-          <div style={{ color: '#555', fontSize: 12, marginTop: 4 }}>PDF</div>
+          <div style={{ color: '#555', fontSize: 12, marginTop: 4 }}>{accept.toUpperCase().replace(/\./g, '').replace(/,/g, ' / ')}</div>
         </>
       ) : (
         <div style={{ textAlign: 'left' }}>
