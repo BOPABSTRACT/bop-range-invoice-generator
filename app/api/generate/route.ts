@@ -113,22 +113,28 @@ type BillingEntry = {
 
 function parseBillingXlsx(buffer: Buffer): Map<string, BillingEntry> {
   const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true })
-  const sheetName = wb.SheetNames.find(n => n.toLowerCase() === 'parsed') || wb.SheetNames[0]
-  const sheet = wb.Sheets[sheetName]
-  if (!sheet) return new Map()
 
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' }) as unknown[][]
-
-  // Find header row.
+  // Find the sheet that actually has an "Invoice Number" header row.
+  // The billing spreadsheet may have multiple sheets (e.g. "Email List" + "Invoice Details");
+  // we want the one with the lookup table, regardless of its name.
+  let rows: unknown[][] = []
   let headerIdx = -1
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i] as unknown[]
-    if (row.some(c => /invoice\s*(number|#|num)/i.test(String(c ?? '')))) {
-      headerIdx = i
-      break
+  for (const name of wb.SheetNames) {
+    const candidate = wb.Sheets[name]
+    if (!candidate) continue
+    const candidateRows = XLSX.utils.sheet_to_json(candidate, { header: 1, defval: '' }) as unknown[][]
+    for (let i = 0; i < Math.min(candidateRows.length, 5); i++) {
+      const r = candidateRows[i] as unknown[]
+      if (r && r.some(c => /invoice\s*(number|#|num)/i.test(String(c ?? '')))) {
+        rows = candidateRows
+        headerIdx = i
+        break
+      }
     }
+    if (headerIdx >= 0) break
   }
   if (headerIdx < 0) return new Map()
+
   const headers = (rows[headerIdx] as unknown[]).map(h => String(h ?? '').toLowerCase().trim())
 
   const col = (...keywords: string[]): number => {
@@ -535,6 +541,227 @@ async function buildInvoicePdf(
 }
 
 // ============================================================
+// EXCEL INVOICE GENERATION (mirrors the PDF layout)
+// ============================================================
+
+async function buildInvoiceXlsx(
+  excelBuffer: Buffer,
+  billing: BillingEntry | undefined,
+  invoiceDateOverride: string,
+): Promise<Buffer> {
+  const workbook = XLSX.read(excelBuffer, { type: 'buffer', cellDates: true })
+  const summarySheet = workbook.Sheets['Summary']
+  const detailSheet = workbook.Sheets['Work Detail']
+  if (!summarySheet) throw new Error('No Summary sheet found')
+
+  const summaryRows = XLSX.utils.sheet_to_json(summarySheet, { header: 1, defval: '' }) as unknown[][]
+  const invoiceNum = String((summaryRows[7] as unknown[])?.[5] ?? '').trim()
+  const invoiceDate = invoiceDateOverride || String((summaryRows[7] as unknown[])?.[1] ?? '')
+  const period = String((summaryRows[15] as unknown[])?.[1] ?? '')
+
+  const lease = billing?.lease ?? ''
+  const parcel = billing?.parcel ?? ''
+  const county = billing?.county || 'Washington'
+  const unit = billing?.unit ?? ''
+  const workType = billing?.type || 'Deed Search'
+
+  // ---- Parse broker table (same logic as PDF) ----
+  let brokerHeaderIdx = 17
+  for (let i = 15; i < Math.min(summaryRows.length, 22); i++) {
+    const r = summaryRows[i] as unknown[]
+    if (r && /^broker$/i.test(String(r[0] ?? '').trim())) { brokerHeaderIdx = i; break }
+  }
+  const brokerHeadersRaw = ((summaryRows[brokerHeaderIdx] as unknown[]) || []).map(h => String(h ?? '').trim())
+  while (brokerHeadersRaw.length > 0 && !brokerHeadersRaw[brokerHeadersRaw.length - 1]) brokerHeadersRaw.pop()
+  const numCols = brokerHeadersRaw.length || 6
+
+  const allBrokerRows: unknown[][] = []
+  for (let i = brokerHeaderIdx + 1; i < summaryRows.length; i++) {
+    const row = summaryRows[i] as unknown[]
+    if (row && row[0] && String(row[0]).trim()) allBrokerRows.push(row)
+  }
+  const dataRows = allBrokerRows.filter(r => String((r as unknown[])[0]).toLowerCase() !== 'totals')
+  const totalsRow = allBrokerRows.find(r => String((r as unknown[])[0]).toLowerCase() === 'totals')
+
+  const projectLabel = lease ? `Lease No. ${lease}` : ''
+  const brokerHeaders = [...brokerHeadersRaw, 'Project']
+
+  // ---- Build the summary sheet as a 2D array with raw values ----
+  const S: unknown[][] = []
+  S.push([BOP.name])
+  S.push([BOP.address])
+  S.push([BOP.city])
+  S.push([BOP.phone])
+  S.push([])
+  S.push(['INVOICE'])
+  S.push([])
+  S.push(['Date:', invoiceDate, '', '', 'Invoice #:', invoiceNum])
+  S.push([])
+  S.push(['Bill To:', BILL_TO.company, '', '', 'Lease No.:', lease])
+  S.push(['', BILL_TO.attn, '', '', 'PID:', parcel])
+  S.push(['', BILL_TO.address, '', '', 'County:', county])
+  S.push(['', BILL_TO.city, '', '', 'Unit:', unit])
+  S.push(['', '', '', '', 'Type:', workType])
+  S.push([])
+  S.push(['Period:', period, '', '', '', 'DUE UPON RECEIPT'])
+  S.push([])
+  // Broker header row
+  const brokerHeaderRowIdx = S.length
+  S.push(brokerHeaders)
+  // Broker data rows
+  for (const dr of dataRows) {
+    const row: unknown[] = new Array(numCols).fill('')
+    for (let c = 0; c < numCols; c++) {
+      const v = (dr as unknown[])[c]
+      row[c] = v === undefined || v === null ? '' : v
+    }
+    row.push(projectLabel)
+    S.push(row)
+  }
+  // Totals row
+  if (totalsRow) {
+    const row: unknown[] = new Array(numCols).fill('')
+    for (let c = 0; c < numCols; c++) {
+      const v = (totalsRow as unknown[])[c]
+      row[c] = v === undefined || v === null ? '' : v
+    }
+    row.push('')
+    S.push(row)
+  }
+
+  const outSheet = XLSX.utils.aoa_to_sheet(S)
+  const totalColsWide = Math.max(brokerHeaders.length, 7)
+
+  // Column widths (approximate: pt/6 = ~character width)
+  const cols: { wch: number }[] = []
+  for (let i = 0; i < totalColsWide; i++) {
+    if (i === 0) cols.push({ wch: 15 })
+    else if (i === brokerHeaders.length - 1) cols.push({ wch: 22 })  // Project
+    else if (i === 1) cols.push({ wch: 34 })                          // Bill To values
+    else if (i === 5) cols.push({ wch: 28 })                          // Right-side values
+    else cols.push({ wch: 15 })
+  }
+  outSheet['!cols'] = cols
+
+  // Merge BOP header + INVOICE across full width
+  const merges: XLSX.Range[] = []
+  for (let r = 0; r <= 3; r++) merges.push({ s: { r, c: 0 }, e: { r, c: totalColsWide - 1 } })
+  merges.push({ s: { r: 5, c: 0 }, e: { r: 5, c: totalColsWide - 1 } })
+  outSheet['!merges'] = merges
+
+  // Apply number formats to numeric cells in the broker table.
+  const CURRENCY_FMT = '$#,##0.00'
+  const DAYS_FMT = '0.000'
+  const brokerBodyRowCount = dataRows.length + (totalsRow ? 1 : 0)
+  for (let bi = 0; bi < brokerBodyRowCount; bi++) {
+    const rowIdx = brokerHeaderRowIdx + 1 + bi
+    for (let ci = 0; ci < brokerHeaders.length; ci++) {
+      const h = brokerHeaders[ci]
+      const kind = classifyHeader(h, ci === 0)
+      const addr = XLSX.utils.encode_cell({ r: rowIdx, c: ci })
+      const cell = outSheet[addr] as { v: unknown; z?: string } | undefined
+      if (!cell || typeof cell.v !== 'number') continue
+      if (kind === 'currency') cell.z = CURRENCY_FMT
+      else if (kind === 'days') cell.z = DAYS_FMT
+      else if (kind === 'miles') cell.z = '0'
+    }
+  }
+
+  const outWb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(outWb, outSheet, 'Summary')
+
+  // ---- Work Detail sheet ----
+  if (detailSheet) {
+    const detRows = XLSX.utils.sheet_to_json(detailSheet, { header: 1, defval: '' }) as unknown[][]
+    let detHeaderIdx = 1
+    for (let i = 0; i < Math.min(detRows.length, 5); i++) {
+      const r = detRows[i] as unknown[]
+      if (r && /^landman$/i.test(String(r[0] ?? '').trim())) { detHeaderIdx = i; break }
+    }
+    const detailHeaders = ((detRows[detHeaderIdx] as unknown[]) || []).map(h => String(h ?? '').trim())
+    while (detailHeaders.length > 0 && !detailHeaders[detailHeaders.length - 1]) detailHeaders.pop()
+    const detailData = detRows.slice(detHeaderIdx + 1).filter(r => {
+      const row = r as unknown[]
+      return row && row[0] && String(row[0]).trim() !== ''
+    })
+
+    if (detailHeaders.length > 0) {
+      const isRateColumn = (h: string) =>
+        /\brate\b|dayrate|per\s+(day|diem|hour|hr|mile)|amt\.?\s*per|amount\s*per/i.test(h)
+
+      const totalsRowDetail: unknown[] = new Array(detailHeaders.length).fill('')
+      totalsRowDetail[0] = 'Totals'
+      detailHeaders.forEach((h, i) => {
+        if (i === 0) return
+        if (isRateColumn(h)) return
+        const kind = classifyHeader(h, false)
+        if (kind === 'currency' || kind === 'days' || kind === 'miles') {
+          let sum = 0
+          let any = false
+          for (const r of detailData) {
+            const v = (r as unknown[])[i]
+            const n = Number(v)
+            if (!isNaN(n) && v !== '' && v !== null && v !== undefined) {
+              sum += n
+              any = true
+            }
+          }
+          if (any) totalsRowDetail[i] = sum
+        }
+      })
+
+      const D: unknown[][] = []
+      D.push(detailHeaders)
+      for (const dr of detailData) {
+        const row: unknown[] = new Array(detailHeaders.length).fill('')
+        for (let c = 0; c < detailHeaders.length; c++) {
+          const v = (dr as unknown[])[c]
+          row[c] = v === undefined || v === null ? '' : v
+        }
+        D.push(row)
+      }
+      D.push(totalsRowDetail)
+
+      const detailOutSheet = XLSX.utils.aoa_to_sheet(D)
+
+      // Column widths for Work Detail
+      const dcols: { wch: number }[] = detailHeaders.map(h => {
+        const lo = h.toLowerCase()
+        if (/description|complete/.test(lo) && !/miles\s+description/.test(lo)) return { wch: 45 }
+        if (/miles\s+description/.test(lo)) return { wch: 22 }
+        if (/landman|prospect/.test(lo)) return { wch: 16 }
+        if (/^date$/.test(lo)) return { wch: 12 }
+        if (/legal/.test(lo)) return { wch: 22 }
+        if (/focus|lease/.test(lo)) return { wch: 16 }
+        if (/\bdays\b/.test(lo)) return { wch: 8 }
+        if (/\bmiles\b/.test(lo) && !/mileage|description/.test(lo)) return { wch: 8 }
+        return { wch: 14 }
+      })
+      detailOutSheet['!cols'] = dcols
+
+      // Apply number formats to Work Detail cells
+      for (let ri = 1; ri < D.length; ri++) {
+        for (let ci = 0; ci < detailHeaders.length; ci++) {
+          const h = detailHeaders[ci]
+          const kind = classifyHeader(h, ci === 0)
+          const addr = XLSX.utils.encode_cell({ r: ri, c: ci })
+          const cell = detailOutSheet[addr] as { v: unknown; z?: string } | undefined
+          if (!cell || typeof cell.v !== 'number') continue
+          if (kind === 'currency') cell.z = CURRENCY_FMT
+          else if (kind === 'days') cell.z = DAYS_FMT
+          else if (kind === 'miles') cell.z = '0'
+        }
+      }
+
+      XLSX.utils.book_append_sheet(outWb, detailOutSheet, 'Work Detail')
+    }
+  }
+
+  const out = XLSX.write(outWb, { type: 'buffer', bookType: 'xlsx' }) as Buffer | ArrayBuffer
+  return Buffer.isBuffer(out) ? out : Buffer.from(out as ArrayBuffer)
+}
+
+// ============================================================
 // POST HANDLER
 // ============================================================
 
@@ -602,8 +829,9 @@ export async function POST(req: NextRequest) {
           zip.file(`${outputName}.pdf`, pdfBuffer)
         }
         if (wantsXlsx) {
-          // Pass-through the source Excel renamed.
-          zip.file(`${outputName}.xlsx`, excelBuffer)
+          // Build a fresh formatted Excel invoice mirroring the PDF layout.
+          const xlsxBuffer = await buildInvoiceXlsx(excelBuffer, billing, invoiceDateOverride)
+          zip.file(`${outputName}.xlsx`, xlsxBuffer)
         }
       } catch (err) {
         return NextResponse.json({ error: `Failed for invoice ${invoiceNum}: ${String(err)}` }, { status: 500 })
