@@ -541,14 +541,24 @@ async function buildInvoicePdf(
 }
 
 // ============================================================
-// EXCEL INVOICE GENERATION (mirrors the PDF layout)
+// EXCEL INVOICE GENERATION (mirrors the PDF layout, fully styled)
 // ============================================================
+
+// Colors matching the PDF
+const XLSX_COLOR_PINK = 'FFF2DCDB'    // Table header background
+const XLSX_COLOR_YELLOW = 'FFFFFF00'  // Totals highlight
+const XLSX_COLOR_RED = 'FFFF0000'     // DUE UPON RECEIPT
+const XLSX_COLOR_GRAY = 'FF646464'    // Label text
+const XLSX_COLOR_BLACK = 'FF000000'
+const XLSX_CURRENCY_FMT = '"$"#,##0.00;("$"#,##0.00)'
+const XLSX_DAYS_FMT = '0.000'
 
 async function buildInvoiceXlsx(
   excelBuffer: Buffer,
   billing: BillingEntry | undefined,
   invoiceDateOverride: string,
 ): Promise<Buffer> {
+  const ExcelJS = (await import('exceljs')).default
   const workbook = XLSX.read(excelBuffer, { type: 'buffer', cellDates: true })
   const summarySheet = workbook.Sheets['Summary']
   const detailSheet = workbook.Sheets['Work Detail']
@@ -565,7 +575,7 @@ async function buildInvoiceXlsx(
   const unit = billing?.unit ?? ''
   const workType = billing?.type || 'Deed Search'
 
-  // ---- Parse broker table (same logic as PDF) ----
+  // ---- Parse broker table ----
   let brokerHeaderIdx = 17
   for (let i = 15; i < Math.min(summaryRows.length, 22); i++) {
     const r = summaryRows[i] as unknown[]
@@ -574,6 +584,8 @@ async function buildInvoiceXlsx(
   const brokerHeadersRaw = ((summaryRows[brokerHeaderIdx] as unknown[]) || []).map(h => String(h ?? '').trim())
   while (brokerHeadersRaw.length > 0 && !brokerHeadersRaw[brokerHeadersRaw.length - 1]) brokerHeadersRaw.pop()
   const numCols = brokerHeadersRaw.length || 6
+  let totalColIdx = brokerHeadersRaw.findIndex(h => /^total$/i.test(h))
+  if (totalColIdx < 0) totalColIdx = numCols - 1
 
   const allBrokerRows: unknown[][] = []
   for (let i = brokerHeaderIdx + 1; i < summaryRows.length; i++) {
@@ -585,90 +597,197 @@ async function buildInvoiceXlsx(
 
   const projectLabel = lease ? `Lease No. ${lease}` : ''
   const brokerHeaders = [...brokerHeadersRaw, 'Project']
+  const totalColsWide = Math.max(brokerHeaders.length, 8)
 
-  // ---- Build the summary sheet as a 2D array with raw values ----
-  const S: unknown[][] = []
-  S.push([BOP.name])
-  S.push([BOP.address])
-  S.push([BOP.city])
-  S.push([BOP.phone])
-  S.push([])
-  S.push(['INVOICE'])
-  S.push([])
-  S.push(['Date:', invoiceDate, '', '', 'Invoice #:', invoiceNum])
-  S.push([])
-  S.push(['Bill To:', BILL_TO.company, '', '', 'Lease No.:', lease])
-  S.push(['', BILL_TO.attn, '', '', 'PID:', parcel])
-  S.push(['', BILL_TO.address, '', '', 'County:', county])
-  S.push(['', BILL_TO.city, '', '', 'Unit:', unit])
-  S.push(['', '', '', '', 'Type:', workType])
-  S.push([])
-  S.push(['Period:', period, '', '', '', 'DUE UPON RECEIPT'])
-  S.push([])
-  // Broker header row
-  const brokerHeaderRowIdx = S.length
-  S.push(brokerHeaders)
-  // Broker data rows
-  for (const dr of dataRows) {
-    const row: unknown[] = new Array(numCols).fill('')
-    for (let c = 0; c < numCols; c++) {
-      const v = (dr as unknown[])[c]
-      row[c] = v === undefined || v === null ? '' : v
-    }
-    row.push(projectLabel)
-    S.push(row)
-  }
-  // Totals row
-  if (totalsRow) {
-    const row: unknown[] = new Array(numCols).fill('')
-    for (let c = 0; c < numCols; c++) {
-      const v = (totalsRow as unknown[])[c]
-      row[c] = v === undefined || v === null ? '' : v
-    }
-    row.push('')
-    S.push(row)
-  }
+  // ---- Borders ----
+  const thin = { style: 'thin' as const, color: { argb: XLSX_COLOR_BLACK } }
+  const borderAll = { top: thin, right: thin, bottom: thin, left: thin }
 
-  const outSheet = XLSX.utils.aoa_to_sheet(S)
-  const totalColsWide = Math.max(brokerHeaders.length, 7)
+  // ---- Workbook ----
+  const wb = new ExcelJS.Workbook()
+  const ws = wb.addWorksheet('Summary', {
+    views: [{ showGridLines: false }],
+    pageSetup: {
+      orientation: 'landscape',
+      paperSize: 1,
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 0,
+      margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.3, footer: 0.3 },
+    },
+  })
 
-  // Column widths (approximate: pt/6 = ~character width)
-  const cols: { wch: number }[] = []
+  // ---- Column widths ----
   for (let i = 0; i < totalColsWide; i++) {
-    if (i === 0) cols.push({ wch: 15 })
-    else if (i === brokerHeaders.length - 1) cols.push({ wch: 22 })  // Project
-    else if (i === 1) cols.push({ wch: 34 })                          // Bill To values
-    else if (i === 5) cols.push({ wch: 28 })                          // Right-side values
-    else cols.push({ wch: 15 })
+    let width = 11
+    if (i === 0) width = 13
+    else if (i === 1) width = 9
+    else if (i === 2) width = 12
+    else if (i === totalColIdx) width = 12
+    else if (i === brokerHeaders.length - 1) width = 20
+    ws.getColumn(i + 1).width = width
   }
-  outSheet['!cols'] = cols
 
-  // Merge BOP header + INVOICE across full width
-  const merges: XLSX.Range[] = []
-  for (let r = 0; r <= 3; r++) merges.push({ s: { r, c: 0 }, e: { r, c: totalColsWide - 1 } })
-  merges.push({ s: { r: 5, c: 0 }, e: { r: 5, c: totalColsWide - 1 } })
-  outSheet['!merges'] = merges
+  const centerAll = { horizontal: 'center' as const, vertical: 'middle' as const }
 
-  // Apply number formats to numeric cells in the broker table.
-  const CURRENCY_FMT = '$#,##0.00'
-  const DAYS_FMT = '0.000'
-  const brokerBodyRowCount = dataRows.length + (totalsRow ? 1 : 0)
-  for (let bi = 0; bi < brokerBodyRowCount; bi++) {
-    const rowIdx = brokerHeaderRowIdx + 1 + bi
+  // ---- BOP header block (rows 1-4) ----
+  const bopLines = [
+    { text: BOP.name, size: 14, bold: true },
+    { text: BOP.address, size: 10, bold: false },
+    { text: BOP.city, size: 10, bold: false },
+    { text: BOP.phone, size: 10, bold: false },
+  ]
+  bopLines.forEach((line, i) => {
+    ws.mergeCells(i + 1, 1, i + 1, totalColsWide)
+    const cell = ws.getCell(i + 1, 1)
+    cell.value = line.text
+    cell.font = { name: 'Helvetica', size: line.size, bold: line.bold }
+    cell.alignment = centerAll
+  })
+
+  // ---- INVOICE title (row 6) ----
+  ws.mergeCells(6, 1, 6, totalColsWide)
+  const invCell = ws.getCell(6, 1)
+  invCell.value = 'INVOICE'
+  invCell.font = { name: 'Helvetica', size: 16, bold: true }
+  invCell.alignment = centerAll
+
+  // ---- Horizontal rule (row 7 bottom border) ----
+  for (let c = 1; c <= totalColsWide; c++) {
+    ws.getCell(7, c).border = { bottom: { style: 'medium', color: { argb: XLSX_COLOR_BLACK } } }
+  }
+
+  const labelFont = { name: 'Helvetica', size: 10, bold: true, color: { argb: XLSX_COLOR_GRAY } }
+  const valueFont = { name: 'Helvetica', size: 10, color: { argb: XLSX_COLOR_BLACK } }
+  const boldValueFont = { name: 'Helvetica', size: 10, bold: true, color: { argb: XLSX_COLOR_BLACK } }
+
+  const leftLabelCol = 1
+  const leftValueColStart = 2
+  const rightLabelCol = Math.floor(totalColsWide / 2) + 1
+  const rightValueColStart = rightLabelCol + 1
+
+  const setLabelLeft = (row: number, text: string) => {
+    const c = ws.getCell(row, leftLabelCol)
+    c.value = text
+    c.font = labelFont
+    c.alignment = { horizontal: 'left', vertical: 'top' }
+  }
+  const setValueLeft = (row: number, text: string, bold = false) => {
+    const startCol = leftValueColStart
+    const endCol = rightLabelCol - 1
+    if (endCol > startCol) ws.mergeCells(row, startCol, row, endCol)
+    const c = ws.getCell(row, startCol)
+    c.value = text
+    c.font = bold ? boldValueFont : valueFont
+    c.alignment = { horizontal: 'left', vertical: 'top', wrapText: true }
+  }
+  const setLabelRight = (row: number, text: string) => {
+    const c = ws.getCell(row, rightLabelCol)
+    c.value = text
+    c.font = labelFont
+    c.alignment = { horizontal: 'left', vertical: 'top' }
+  }
+  const setValueRight = (row: number, text: string) => {
+    const startCol = rightValueColStart
+    const endCol = totalColsWide
+    if (endCol > startCol) ws.mergeCells(row, startCol, row, endCol)
+    const c = ws.getCell(row, startCol)
+    c.value = text
+    c.font = valueFont
+    c.alignment = { horizontal: 'left', vertical: 'top', wrapText: true }
+  }
+
+  // Row 9: Date + Invoice #
+  setLabelLeft(9, 'Date:')
+  setValueLeft(9, invoiceDate)
+  setLabelRight(9, 'Invoice #:')
+  setValueRight(9, invoiceNum)
+
+  // Rows 11-15: Bill To on left, Lease/PID/County/Unit/Type on right
+  setLabelLeft(11, 'Bill To:')
+  setValueLeft(11, BILL_TO.company, true)
+  setValueLeft(12, BILL_TO.attn)
+  setValueLeft(13, BILL_TO.address)
+  setValueLeft(14, BILL_TO.city)
+
+  setLabelRight(11, 'Lease No.:')
+  setValueRight(11, lease)
+  setLabelRight(12, 'PID:')
+  setValueRight(12, parcel)
+  setLabelRight(13, 'County:')
+  setValueRight(13, county)
+  setLabelRight(14, 'Unit:')
+  setValueRight(14, unit)
+  setLabelRight(15, 'Type:')
+  setValueRight(15, workType)
+
+  // Row 17: Period + DUE UPON RECEIPT
+  setLabelLeft(17, 'Period:')
+  setValueLeft(17, period)
+  const dueCell = ws.getCell(17, totalColsWide)
+  dueCell.value = 'DUE UPON RECEIPT'
+  dueCell.font = { name: 'Helvetica', size: 10, bold: true, color: { argb: XLSX_COLOR_RED } }
+  dueCell.alignment = { horizontal: 'right', vertical: 'middle' }
+
+  // Row 19: Broker table header
+  const brokerHeaderRow = 19
+  brokerHeaders.forEach((h, i) => {
+    const cell = ws.getCell(brokerHeaderRow, i + 1)
+    cell.value = h
+    cell.font = { name: 'Helvetica', size: 9, bold: true, color: { argb: XLSX_COLOR_BLACK } }
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XLSX_COLOR_PINK } }
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }
+    cell.border = borderAll
+  })
+  ws.getRow(brokerHeaderRow).height = 36
+
+  // Broker data + totals rows
+  let rowIdx = brokerHeaderRow
+  const writeBrokerRow = (row: unknown[], isTotalsRow: boolean) => {
+    rowIdx++
     for (let ci = 0; ci < brokerHeaders.length; ci++) {
+      const cell = ws.getCell(rowIdx, ci + 1)
       const h = brokerHeaders[ci]
+      const isProjectCol = ci === brokerHeaders.length - 1
+      const isTotalCol = ci === totalColIdx
+      let value: unknown = ''
+      if (isProjectCol) value = isTotalsRow ? '' : projectLabel
+      else if (ci < numCols) {
+        const v = row[ci]
+        value = v === undefined || v === null ? '' : v
+      }
+      if (isTotalsRow && ci === 0) value = 'Totals'
+
+      cell.value = value as ExcelJS.CellValue
       const kind = classifyHeader(h, ci === 0)
-      const addr = XLSX.utils.encode_cell({ r: rowIdx, c: ci })
-      const cell = outSheet[addr] as { v: unknown; z?: string } | undefined
-      if (!cell || typeof cell.v !== 'number') continue
-      if (kind === 'currency') cell.z = CURRENCY_FMT
-      else if (kind === 'days') cell.z = DAYS_FMT
-      else if (kind === 'miles') cell.z = '0'
+      cell.font = { name: 'Helvetica', size: 9, bold: isTotalsRow, color: { argb: XLSX_COLOR_BLACK } }
+      cell.border = borderAll
+      cell.alignment = {
+        horizontal: ci === 0 ? 'left' : (kind === 'text' ? 'left' : (kind === 'days' || kind === 'miles' ? 'center' : 'right')),
+        vertical: 'middle',
+        wrapText: isProjectCol,
+      }
+      if (typeof value === 'number') {
+        if (kind === 'currency') cell.numFmt = XLSX_CURRENCY_FMT
+        else if (kind === 'days') cell.numFmt = XLSX_DAYS_FMT
+        else if (kind === 'miles') cell.numFmt = '0'
+      }
+      if (isTotalsRow && isTotalCol) {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XLSX_COLOR_YELLOW } }
+      }
     }
   }
 
-  const outWb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(outWb, outSheet, 'Summary')
+  for (const dr of dataRows) writeBrokerRow(dr as unknown[], false)
+  if (totalsRow) writeBrokerRow(totalsRow as unknown[], true)
+
+  // Footer note
+  const noteRow = rowIdx + 2
+  ws.mergeCells(noteRow, 1, noteRow, totalColsWide)
+  const nc = ws.getCell(noteRow, 1)
+  nc.value = 'Please contact our accounting department with any questions regarding invoices'
+  nc.font = { name: 'Helvetica', size: 8, italic: true, color: { argb: XLSX_COLOR_GRAY } }
+  nc.alignment = { horizontal: 'center' }
 
   // ---- Work Detail sheet ----
   if (detailSheet) {
@@ -686,6 +805,52 @@ async function buildInvoiceXlsx(
     })
 
     if (detailHeaders.length > 0) {
+      const dws = wb.addWorksheet('Work Detail', {
+        views: [{ showGridLines: false }],
+        pageSetup: {
+          orientation: 'landscape', paperSize: 1, fitToPage: true, fitToWidth: 1, fitToHeight: 0,
+          margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.3, footer: 0.3 },
+        },
+      })
+
+      detailHeaders.forEach((h, i) => {
+        const lo = h.toLowerCase()
+        let w = 12
+        if (/description|complete/.test(lo) && !/miles\s+description/.test(lo)) w = 40
+        else if (/miles\s+description/.test(lo)) w = 18
+        else if (/landman|prospect/.test(lo)) w = 14
+        else if (/^date$/.test(lo)) w = 11
+        else if (/legal/.test(lo)) w = 18
+        else if (/focus|lease/.test(lo)) w = 13
+        else if (/\bdays\b/.test(lo)) w = 7
+        else if (/\bmiles\b/.test(lo) && !/mileage|description/.test(lo)) w = 7
+        dws.getColumn(i + 1).width = w
+      })
+
+      // "Work Detail" title (row 1)
+      dws.mergeCells(1, 1, 1, detailHeaders.length)
+      const t = dws.getCell(1, 1)
+      t.value = 'Work Detail'
+      t.font = { name: 'Helvetica', size: 12, bold: true }
+      t.alignment = { horizontal: 'left', vertical: 'middle' }
+      dws.getRow(1).height = 22
+      for (let c = 1; c <= detailHeaders.length; c++) {
+        dws.getCell(1, c).border = { bottom: { style: 'medium', color: { argb: XLSX_COLOR_BLACK } } }
+      }
+
+      // Header row (row 3)
+      const dHeaderRow = 3
+      detailHeaders.forEach((h, i) => {
+        const cell = dws.getCell(dHeaderRow, i + 1)
+        cell.value = h
+        cell.font = { name: 'Helvetica', size: 8, bold: true }
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XLSX_COLOR_PINK } }
+        cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }
+        cell.border = borderAll
+      })
+      dws.getRow(dHeaderRow).height = 32
+
+      const detailTotalColIdx = detailHeaders.findIndex(h => /^total$/i.test(h))
       const isRateColumn = (h: string) =>
         /\brate\b|dayrate|per\s+(day|diem|hour|hr|mile)|amt\.?\s*per|amount\s*per/i.test(h)
 
@@ -710,55 +875,40 @@ async function buildInvoiceXlsx(
         }
       })
 
-      const D: unknown[][] = []
-      D.push(detailHeaders)
-      for (const dr of detailData) {
-        const row: unknown[] = new Array(detailHeaders.length).fill('')
-        for (let c = 0; c < detailHeaders.length; c++) {
-          const v = (dr as unknown[])[c]
-          row[c] = v === undefined || v === null ? '' : v
-        }
-        D.push(row)
-      }
-      D.push(totalsRowDetail)
-
-      const detailOutSheet = XLSX.utils.aoa_to_sheet(D)
-
-      // Column widths for Work Detail
-      const dcols: { wch: number }[] = detailHeaders.map(h => {
-        const lo = h.toLowerCase()
-        if (/description|complete/.test(lo) && !/miles\s+description/.test(lo)) return { wch: 45 }
-        if (/miles\s+description/.test(lo)) return { wch: 22 }
-        if (/landman|prospect/.test(lo)) return { wch: 16 }
-        if (/^date$/.test(lo)) return { wch: 12 }
-        if (/legal/.test(lo)) return { wch: 22 }
-        if (/focus|lease/.test(lo)) return { wch: 16 }
-        if (/\bdays\b/.test(lo)) return { wch: 8 }
-        if (/\bmiles\b/.test(lo) && !/mileage|description/.test(lo)) return { wch: 8 }
-        return { wch: 14 }
-      })
-      detailOutSheet['!cols'] = dcols
-
-      // Apply number formats to Work Detail cells
-      for (let ri = 1; ri < D.length; ri++) {
+      let dRow = dHeaderRow
+      const writeDetailRow = (row: unknown[], isTotalsRow: boolean) => {
+        dRow++
         for (let ci = 0; ci < detailHeaders.length; ci++) {
+          const cell = dws.getCell(dRow, ci + 1)
           const h = detailHeaders[ci]
+          const v = row[ci]
+          const value: unknown = v === undefined || v === null ? '' : v
+          cell.value = value as ExcelJS.CellValue
           const kind = classifyHeader(h, ci === 0)
-          const addr = XLSX.utils.encode_cell({ r: ri, c: ci })
-          const cell = detailOutSheet[addr] as { v: unknown; z?: string } | undefined
-          if (!cell || typeof cell.v !== 'number') continue
-          if (kind === 'currency') cell.z = CURRENCY_FMT
-          else if (kind === 'days') cell.z = DAYS_FMT
-          else if (kind === 'miles') cell.z = '0'
+          cell.font = { name: 'Helvetica', size: 8, bold: isTotalsRow }
+          cell.border = borderAll
+          cell.alignment = {
+            horizontal: kind === 'currency' ? 'right' : (kind === 'days' || kind === 'miles' ? 'center' : 'left'),
+            vertical: 'top', wrapText: true,
+          }
+          if (typeof value === 'number') {
+            if (kind === 'currency') cell.numFmt = XLSX_CURRENCY_FMT
+            else if (kind === 'days') cell.numFmt = XLSX_DAYS_FMT
+            else if (kind === 'miles') cell.numFmt = '0'
+          }
+          if (isTotalsRow && ci === detailTotalColIdx) {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XLSX_COLOR_YELLOW } }
+          }
         }
       }
 
-      XLSX.utils.book_append_sheet(outWb, detailOutSheet, 'Work Detail')
+      for (const dr of detailData) writeDetailRow(dr as unknown[], false)
+      writeDetailRow(totalsRowDetail, true)
     }
   }
 
-  const out = XLSX.write(outWb, { type: 'buffer', bookType: 'xlsx' }) as Buffer | ArrayBuffer
-  return Buffer.isBuffer(out) ? out : Buffer.from(out as ArrayBuffer)
+  const arrayBuf = await wb.xlsx.writeBuffer()
+  return Buffer.from(arrayBuf as ArrayBuffer)
 }
 
 // ============================================================
